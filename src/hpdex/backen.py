@@ -12,7 +12,6 @@ Key Features:
 - FDR correction and fold change calculation
 - Progress tracking and comprehensive error handling
 
-Author: krkawzq
 """
 
 import logging

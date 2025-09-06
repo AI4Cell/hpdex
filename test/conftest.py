@@ -4,7 +4,6 @@ Pytest configuration file for hpdex testing.
 This file provides configuration and fixtures for pytest tests,
 including command-line options for customizing test parameters.
 
-Author: krkawzq
 """
 
 import pytest

@@ -22,7 +22,6 @@ Usage:
     # Performance benchmarks with custom settings
     pytest benchmarks.py --test-performance --n-workers 8 --benchmark-sizes "small,medium"
 
-Author: krkawzq
 """
 
 import pytest
