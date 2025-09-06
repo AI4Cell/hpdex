@@ -1124,7 +1124,7 @@ def _compute_statistical_test(ref_block: np.ndarray, tar_block: np.ndarray, metr
 
 
 # -- Public API
-def parallel_difference_expression(
+def parallel_differential_expression(
     adata: ad.AnnData,
     groupby_key: str,
     reference: str,

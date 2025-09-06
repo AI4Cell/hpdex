@@ -81,7 +81,7 @@ df = parallel_difference_expression(
     continuity_correction=True,   # Continuity correction
     min_samples=5,                # Minimum sample size
     num_workers=8,                # Number of parallel processes
-    batch=1000000,         # Batch processing budget
+    batch=1000000,                # Batch processing budget
 )
 
 # View results
