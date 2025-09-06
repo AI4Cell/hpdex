@@ -114,6 +114,7 @@ parallel_differential_expression(
 | `prefer_hist_if_int` | `bool` | `False` | Prefer histogram for integer data |
 | `num_workers` | `int` | `1` | Number of parallel processes |
 | `batch` | `int` | `1000000` | Batch size for memory management |
+| `clip_value` | `float` | `20.0` | Value to clip fold change to if it is infinite or NaN |
 
 #### Returns
 
