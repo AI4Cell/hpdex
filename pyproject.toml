@@ -1,6 +1,6 @@
 [project]
 name = "hpdex"
-version = "0.1.2"
+version = "0.1.4"
 description = "High-Performance Parallel Differential Expression Analysis for Single-Cell Data"
 readme = "README.md"
 requires-python = ">=3.10"

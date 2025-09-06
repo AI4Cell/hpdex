@@ -13,8 +13,8 @@ Usage Examples:
     python run_tests.py --kernels --pipeline
     python run_tests.py --performance --n-workers 8
     
-    # Run with real data
-    python run_tests.py --real-data --h5ad-files "PBMC_10K.h5ad,HumanPBMC.h5ad"
+    # Run with real data (automatically finds all .h5ad files)
+    python run_tests.py --real-data --real-groupby gene --real-reference control
     
     # Performance benchmarks only
     python run_tests.py --performance --benchmark-sizes "small,medium" --skip-slow
@@ -62,15 +62,13 @@ def main():
     
     # Test configuration
     config_group = parser.add_argument_group("Test Configuration")
-    config_group.add_argument("--test-data-dir", default="../Datasets",
+    config_group.add_argument("--test-data-dir", default="./test_data",
                             help="Directory containing test datasets")
-    config_group.add_argument("--h5ad-files", 
-                            help="Comma-separated list of h5ad files to test")
     config_group.add_argument("--n-workers", type=int, default=4,
                             help="Number of workers for parallel testing")
-    config_group.add_argument("--max-cells", type=int, default=10000,
+    config_group.add_argument("--max-cells", type=int, default=1000000,
                             help="Maximum number of cells for testing")
-    config_group.add_argument("--max-genes", type=int, default=2000,
+    config_group.add_argument("--max-genes", type=int, default=100000,
                             help="Maximum number of genes for testing")
     config_group.add_argument("--tolerance", type=float, default=1e-4,
                             help="Tolerance for numerical comparisons")
@@ -85,6 +83,17 @@ def main():
                           help="Skip slow/large-scale performance tests")
     perf_group.add_argument("--benchmark-sizes", default="small,medium,large",
                           help="Comma-separated benchmark sizes")
+    perf_group.add_argument("--timeout", type=int, default=60,
+                          help="Timeout in seconds for each test (default: 60)")
+    
+    # Real data configuration
+    real_group = parser.add_argument_group("Real Data Configuration")
+    real_group.add_argument("--real-groupby", default="",
+                          help="Column name for grouping in real data tests")
+    real_group.add_argument("--real-reference", default="",
+                          help="Reference group name for real data tests") 
+    real_group.add_argument("--real-groups", default="",
+                          help="Comma-separated target groups for real data tests")
     
     # Pytest options
     pytest_group = parser.add_argument_group("Pytest Options")
@@ -98,8 +107,8 @@ def main():
                             help="Run tests matching given mark expression")
     pytest_group.add_argument("--keyword", "-k",
                             help="Run tests matching given keyword expression")
-    pytest_group.add_argument("--capture", choices=["yes", "no", "sys"], default="yes",
-                            help="Capture stdout/stderr")
+    pytest_group.add_argument("--capture", choices=["yes", "no", "sys"], default="no",
+                            help="Capture stdout/stderr (default: no - show output)")
     pytest_group.add_argument("--cov", action="store_true",
                             help="Enable coverage reporting")
     pytest_group.add_argument("--no-cov", action="store_true",
@@ -164,11 +173,18 @@ def main():
         f"--tolerance={args.tolerance}",
         f"--correlation-threshold={args.correlation_threshold}",
         f"--fdr-threshold={args.fdr_threshold}",
-        f"--benchmark-sizes={args.benchmark_sizes}"
+        f"--benchmark-sizes={args.benchmark_sizes}",
+        f"--timeout={args.timeout}"
     ])
     
-    if args.h5ad_files:
-        pytest_flags.append(f"--h5ad-files={args.h5ad_files}")
+    # Add real data configuration if provided
+    if args.real_groupby:
+        pytest_flags.append(f"--real-groupby={args.real_groupby}")
+    if args.real_reference:
+        pytest_flags.append(f"--real-reference={args.real_reference}")
+    if args.real_groups:
+        pytest_flags.append(f"--real-groups={args.real_groups}")
+    
     
     if args.skip_slow:
         pytest_flags.append("--skip-slow")
@@ -204,8 +220,12 @@ def main():
     print(f"Workers: {args.n_workers}")
     print(f"Max cells: {args.max_cells:,}, Max genes: {args.max_genes:,}")
     print(f"Data directory: {args.test_data_dir}")
-    if args.h5ad_files:
-        print(f"H5AD files: {args.h5ad_files}")
+    if args.real_groupby:
+        print(f"Real data groupby: {args.real_groupby}")
+    if args.real_reference:
+        print(f"Real data reference: {args.real_reference}")
+    if args.real_groups:
+        print(f"Real data groups: {args.real_groups}")
     print()
     
     return run_pytest(pytest_args)

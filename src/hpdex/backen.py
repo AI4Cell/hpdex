@@ -715,7 +715,7 @@ def _create_presorted_ref_data(adata: ad.AnnData, ref_rows: np.ndarray) -> np.nd
     return ref_data_sorted
 
 
-def _compute_fold_change(adata: ad.AnnData, ref_rows: np.ndarray, target_rows_list: List[np.ndarray]) -> np.ndarray:
+def _compute_fold_change(adata: ad.AnnData, ref_rows: np.ndarray, target_rows_list: List[np.ndarray], clip_value: float = 20.0) -> np.ndarray:
     """Compute fold change matrix aligned with pdex calculation method.
     
     Optimized version for computing fold changes between target groups and reference group.
@@ -751,9 +751,17 @@ def _compute_fold_change(adata: ad.AnnData, ref_rows: np.ndarray, target_rows_li
             # Optimized fold change calculation
             with np.errstate(divide="ignore", invalid="ignore"):
                 fc = target_mean / ref_mean
-                # Use pre-computed mask for faster processing
-                fc = np.where(ref_zero_mask, np.nan, fc)
-                fc = np.where(target_mean == 0, 0.0, fc)
+                # Handle special cases with configurable clip_value:
+                # Use a small tolerance for zero comparison to handle floating point precision
+                ref_zero_mask_tol = (ref_mean < 1e-10)
+                target_zero_mask_tol = (target_mean < 1e-10)
+                
+                # 1. If ref_mean ≈ 0 and target_mean ≈ 0: set to clip_value (for pdex alignment)
+                # 2. If ref_mean ≈ 0 and target_mean > 0: set to np.inf
+                # 3. If target_mean ≈ 0 and ref_mean > 0: set to 0.0
+                fc = np.where(ref_zero_mask_tol & target_zero_mask_tol, clip_value, fc)
+                fc = np.where(ref_zero_mask_tol & ~target_zero_mask_tol, np.inf, fc)
+                fc = np.where(target_zero_mask_tol & ~ref_zero_mask_tol, 0.0, fc)
             
             fc_matrix[i, :] = fc
     else:  # Dense matrix
@@ -765,8 +773,17 @@ def _compute_fold_change(adata: ad.AnnData, ref_rows: np.ndarray, target_rows_li
             # Optimized fold change calculation
             with np.errstate(divide="ignore", invalid="ignore"):
                 fc = target_mean / ref_mean
-                fc = np.where(ref_zero_mask, np.nan, fc)
-                fc = np.where(target_mean == 0, 0.0, fc)
+                # Handle special cases with configurable clip_value:
+                # Use a small tolerance for zero comparison to handle floating point precision
+                ref_zero_mask_tol = (ref_mean < 1e-10)
+                target_zero_mask_tol = (target_mean < 1e-10)
+                
+                # 1. If ref_mean ≈ 0 and target_mean ≈ 0: set to clip_value (for pdex alignment)
+                # 2. If ref_mean ≈ 0 and target_mean > 0: set to np.inf
+                # 3. If target_mean ≈ 0 and ref_mean > 0: set to 0.0
+                fc = np.where(ref_zero_mask_tol & target_zero_mask_tol, clip_value, fc)
+                fc = np.where(ref_zero_mask_tol & ~target_zero_mask_tol, np.inf, fc)
+                fc = np.where(target_zero_mask_tol & ~ref_zero_mask_tol, 0.0, fc)
             
             fc_matrix[i, :] = fc
     
@@ -1137,6 +1154,7 @@ def parallel_differential_expression(
     prefer_hist_if_int: bool = False,
     num_workers: int = 1,
     batch: int = 5000 * 200,
+    clip_value: float = 20.0,
 ) -> pd.DataFrame:
     """High-performance parallel differential expression analysis.
     
@@ -1158,6 +1176,7 @@ def parallel_differential_expression(
         prefer_hist_if_int: Prefer histogram algorithm for integer data
         num_workers: Number of parallel worker processes
         batch_budget: Batch processing budget for task chunking
+        clip_value: Value to clip fold change to if it is infinite or NaN (default: 20.0). Set to None to disable clipping.
         
     Returns:
         DataFrame containing results with columns:
@@ -1282,7 +1301,7 @@ def parallel_differential_expression(
 
             # Calculate fold change
             logging.info("Calculating fold change...")
-            fc_matrix = _compute_fold_change(adata, row_idx_ref, group_rows)
+            fc_matrix = _compute_fold_change(adata, row_idx_ref, group_rows, clip_value)
 
             # Calculate log2 fold change
             logging.info("Calculating log2 fold change...")

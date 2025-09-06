@@ -1,5 +1,3 @@
-# hpdex
-
 <div align="center">
 
 # 🧬 hpdex: High-Performance Differential Expression Analysis
@@ -14,7 +12,7 @@
 [**Installation**](#installation) •
 [**Quick Start**](#quick-start) •
 [**Documentation**](#api-reference) •
-[**Performance**](#performance-benchmarks) •
+[**Performance**](#performance) •
 [**Testing**](#testing)
 
 </div>

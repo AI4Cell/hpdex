@@ -9,3 +9,6 @@ wheels/
 # Virtual environments
 .venv
 uv.lock
+
+.pytest_cache/
+test/test_data

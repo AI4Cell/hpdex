@@ -10,4 +10,4 @@ __all__ = [
     "rank_sum_chunk_kernel_hist"
 ]
 
-__version__ = "0.1.3"
+__version__ = "0.1.4"

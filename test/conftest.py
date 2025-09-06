@@ -13,6 +13,79 @@ import anndata as ad
 from pathlib import Path
 from typing import List, Optional, Tuple, Dict, Any
 import warnings
+import signal
+import functools
+
+
+class TimeoutError(Exception):
+    """Timeout exception for long-running tests."""
+    pass
+
+
+def timeout_handler(signum, frame):
+    """Signal handler for timeout."""
+    raise TimeoutError("Test timed out")
+
+
+def with_timeout(seconds):
+    """Decorator to add timeout to functions."""
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            # Set up the timeout
+            old_handler = signal.signal(signal.SIGALRM, timeout_handler)
+            signal.alarm(seconds)
+            
+            try:
+                result = func(*args, **kwargs)
+                return result
+            except TimeoutError:
+                print(f"\n⏰ Function {func.__name__} timed out after {seconds} seconds")
+                raise
+            finally:
+                # Clean up
+                signal.alarm(0)
+                signal.signal(signal.SIGALRM, old_handler)
+        
+        return wrapper
+    return decorator
+
+
+def run_with_timeout(func, timeout_seconds, *args, **kwargs):
+    """Run a function with timeout protection."""
+    import threading
+    import queue
+    
+    result_queue = queue.Queue()
+    exception_queue = queue.Queue()
+    
+    def target():
+        try:
+            result = func(*args, **kwargs)
+            result_queue.put(result)
+        except Exception as e:
+            exception_queue.put(e)
+    
+    thread = threading.Thread(target=target)
+    thread.daemon = True
+    thread.start()
+    thread.join(timeout_seconds)
+    
+    if thread.is_alive():
+        # Thread is still running, timeout occurred
+        print(f"\n⏰ Function timed out after {timeout_seconds} seconds")
+        # Note: We can't actually kill the thread, but we can return a timeout indicator
+        return None, True  # (result, timed_out)
+    
+    # Check for exceptions
+    if not exception_queue.empty():
+        raise exception_queue.get()
+    
+    # Get result
+    if not result_queue.empty():
+        return result_queue.get(), False
+    
+    return None, False
 
 
 def pytest_addoption(parser):
@@ -22,16 +95,10 @@ def pytest_addoption(parser):
     parser.addoption(
         "--test-data-dir",
         action="store",
-        default="../Datasets",
+        default="./test_data",
         help="Directory containing test datasets (default: ../Datasets)"
     )
     
-    parser.addoption(
-        "--h5ad-files",
-        action="store",
-        default="",
-        help="Comma-separated list of h5ad files to test (default: auto-detect)"
-    )
     
     # Test scope configuration
     parser.addoption(
@@ -82,16 +149,16 @@ def pytest_addoption(parser):
         "--max-cells",
         action="store",
         type=int,
-        default=10000,
-        help="Maximum number of cells for testing large datasets (default: 10000)"
+        default=1000000,
+        help="Maximum number of cells for testing large datasets (default: 1000000)"
     )
     
     parser.addoption(
         "--max-genes",
         action="store",
         type=int,
-        default=2000,
-        help="Maximum number of genes for testing large datasets (default: 2000)"
+        default=100000,
+        help="Maximum number of genes for testing large datasets (default: 100000)"
     )
     
     parser.addoption(
@@ -132,6 +199,36 @@ def pytest_addoption(parser):
         default="small,medium,large",
         help="Comma-separated benchmark sizes: small,medium,large,huge (default: small,medium,large)"
     )
+    
+    parser.addoption(
+        "--timeout",
+        action="store",
+        type=int,
+        default=60,
+        help="Maximum time in seconds for each test (default: 60)"
+    )
+    
+    # Real data test configuration
+    parser.addoption(
+        "--real-groupby",
+        action="store",
+        default="",
+        help="Column name for grouping in real data tests (auto-detect if empty)"
+    )
+    
+    parser.addoption(
+        "--real-reference",
+        action="store", 
+        default="",
+        help="Reference group name for real data tests (auto-detect if empty)"
+    )
+    
+    parser.addoption(
+        "--real-groups",
+        action="store",
+        default="",
+        help="Comma-separated target groups for real data tests (auto-detect if empty)"
+    )
 
 
 @pytest.fixture(scope="session")
@@ -140,7 +237,6 @@ def test_config(request):
     config = {
         # Data paths
         "test_data_dir": Path(request.config.getoption("--test-data-dir")),
-        "h5ad_files": request.config.getoption("--h5ad-files").split(",") if request.config.getoption("--h5ad-files") else [],
         
         # Test scope
         "test_kernels": request.config.getoption("--test-kernels") or request.config.getoption("--test-all"),
@@ -159,6 +255,12 @@ def test_config(request):
         # Performance config
         "skip_slow": request.config.getoption("--skip-slow"),
         "benchmark_sizes": request.config.getoption("--benchmark-sizes").split(","),
+        "timeout": request.config.getoption("--timeout"),
+        
+        # Real data config
+        "real_groupby": request.config.getoption("--real-groupby"),
+        "real_reference": request.config.getoption("--real-reference"),
+        "real_groups": request.config.getoption("--real-groups").split(",") if request.config.getoption("--real-groups") else [],
     }
     
     return config
@@ -173,24 +275,11 @@ def available_datasets(test_config):
         warnings.warn(f"Test data directory not found: {data_dir}")
         return []
     
-    # Auto-discover h5ad files if not specified
-    if test_config["h5ad_files"] and test_config["h5ad_files"][0]:
-        h5ad_files = []
-        for filename in test_config["h5ad_files"]:
-            filepath = data_dir / "CellFM" / filename
-            if filepath.exists():
-                h5ad_files.append(filepath)
-            else:
-                warnings.warn(f"H5AD file not found: {filepath}")
-    else:
-        # Auto-discover
-        cellFM_dir = data_dir / "CellFM"
-        if cellFM_dir.exists():
-            h5ad_files = list(cellFM_dir.glob("*.h5ad"))
-            # Sort by file size (smaller first for faster testing)
-            h5ad_files.sort(key=lambda x: x.stat().st_size)
-        else:
-            h5ad_files = []
+    # Simply find all .h5ad files recursively
+    h5ad_files = list(data_dir.rglob("*.h5ad"))
+    
+    # Sort by file size (smaller first for faster testing)
+    h5ad_files.sort(key=lambda x: x.stat().st_size)
     
     return h5ad_files
 
@@ -229,12 +318,20 @@ def synthetic_data():
         
         group_labels = np.array(group_labels[:n_cells])
         
-        # Create AnnData object
-        adata = ad.AnnData(
-            X=X,
-            obs=pd.DataFrame({'group': group_labels}),
-            var=pd.DataFrame(index=[f'gene_{i}' for i in range(n_genes)])
-        )
+        # Create AnnData object with explicit string indices to avoid warnings
+        obs_df = pd.DataFrame({'group': group_labels})
+        obs_df.index = obs_df.index.astype(str)
+        
+        var_df = pd.DataFrame(index=pd.Index([f'gene_{i}' for i in range(n_genes)], dtype=str))
+        
+        # Suppress the specific warning during AnnData creation
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", ".*Transforming to str index.*")
+            adata = ad.AnnData(
+                X=X,
+                obs=obs_df,
+                var=var_df
+            )
         
         return adata
     
@@ -245,10 +342,10 @@ def synthetic_data():
 def performance_benchmarks():
     """Performance benchmark configurations."""
     return {
-        "small": {"n_cells": 1000, "n_genes": 500},
-        "medium": {"n_cells": 5000, "n_genes": 1000}, 
-        "large": {"n_cells": 10000, "n_genes": 2000},
-        "huge": {"n_cells": 50000, "n_genes": 10000},
+        "small": {"n_cells": 5000, "n_genes": 10000},
+        "medium": {"n_cells": 10000, "n_genes": 10000}, 
+        "large": {"n_cells": 10000, "n_genes": 20000},
+        "huge": {"n_cells": 100000, "n_genes": 20000},
     }
 
 
