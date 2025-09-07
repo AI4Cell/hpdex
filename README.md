@@ -1,17 +1,14 @@
 <div align="center">
 
-<!-- Optional logo -->
-
-<!-- <img src=".github/assets/hpdex-logo.svg" width="96" alt="hpdex logo" /> -->
-
 <h1>hpdex</h1>
 
 <p><em>High‑performance differential expression analysis for single‑cell data</em></p>
 
 <p>
+  <a href="https://pypi.org/project/hpdex/"><img src="https://img.shields.io/pypi/v/hpdex.svg?color=blue" alt="PyPI version" /></a>
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.10%2B-blue.svg" alt="Python 3.10+" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT License" /></a>
-  <img src="https://img.shields.io/badge/status-experimental-purple" alt="Status: experimental" />
+  <img src="https://img.shields.io/badge/status-stable-brightgreen" alt="Status: stable" />
 </p>
 
 <p>
@@ -31,7 +28,7 @@
 
 ## 🔎 Overview
 
-**hpdex** provides efficient differential expression (DE) analysis for single‑cell data using **multiprocessing** and an optimized **Mann–Whitney U** implementation. It aims to be *statistically consistent* with `scipy.stats.mannwhitneyu` while scaling to large datasets.
+**hpdex** provides efficient differential expression (DE) analysis for single‑cell data using **multiprocessing** and an optimized **Mann–Whitney U** implementation. It is now available on [PyPI](https://pypi.org/project/hpdex/) and aims to be *statistically consistent* with `scipy.stats.mannwhitneyu` while scaling to large datasets.
 
 <table>
   <tr>
@@ -50,13 +47,13 @@
 
 ## ⚙️ Installation
 
-### Quick Install (coming soon)
+### From PyPI
 
 ```bash
 pip install hpdex
 ```
 
-### uv (recommended)
+### From source (uv)
 
 ```bash
 git clone https://github.com/AI4Cell/hpdex.git
@@ -64,7 +61,7 @@ cd hpdex
 uv sync
 ```
 
-### pip (from source)
+### From source (pip)
 
 ```bash
 git clone https://github.com/AI4Cell/hpdex.git
@@ -76,7 +73,7 @@ pip install -e .
 <summary><strong>Requirements</strong></summary>
 
 * Python ≥ 3.10
-* <code>numpy</code>, <code>scipy</code>, <code>numba</code>, <code>pandas</code>, <code>anndata</code>
+* <code>numpy</code>, <code>scipy</code>, <code>numba</code>, <code>pandas</code>, <code>anndata</code>, <code>tqdm</code>
 
 </details>
 
@@ -237,5 +234,5 @@ MIT License — see [LICENSE](LICENSE).
 ---
 
 <div align="center">
-  <sub>Built for large‑scale single‑cell perturbation analysis.</sub>
+  <sub>Built for large‑scale single‑cell perturbation analysis. Now available on <a href="https://pypi.org/project/hpdex/">PyPI</a>.</sub>
 </div>
