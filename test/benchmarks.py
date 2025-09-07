@@ -24,17 +24,17 @@ Usage:
 
 """
 
-import pytest
-import numpy as np
-import pandas as pd
-import anndata as ad
 import time
 import warnings
-from typing import Tuple, List, Dict, Any
 from pathlib import Path
+from typing import Any, Dict, List, Tuple
 
+import anndata as ad
+import numpy as np
+import pandas as pd
+import pytest
 # Import timeout utilities from conftest
-from conftest import run_with_timeout, TimeoutError
+from conftest import TimeoutError, run_with_timeout
 
 # Import test modules
 try:
@@ -52,11 +52,9 @@ except ImportError:
     warnings.warn("pdex not available, using mock for comparison tests")
 
 # Import hpdex components
-from hpdex.backen import (
-    rank_sum_chunk_kernel_float,
-    rank_sum_chunk_kernel_hist,
-    parallel_differential_expression
-)
+from hpdex.backen import (parallel_differential_expression,
+                          rank_sum_chunk_kernel_float,
+                          rank_sum_chunk_kernel_hist)
 
 
 class ScipyWrapper:

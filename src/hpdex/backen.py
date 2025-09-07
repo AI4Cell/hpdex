@@ -15,674 +15,156 @@ Key Features:
 """
 
 import logging
-import math
 import multiprocessing as mp
-import os
-from multiprocessing.shared_memory import SharedMemory
-from typing import Dict, Iterable, List, Optional, Tuple, Union
+from typing import List, Optional, Tuple
 
 import anndata as ad
 import numpy as np
 import pandas as pd
-from numba import get_num_threads, get_thread_id, njit, prange
 from scipy.sparse import csc_matrix, csr_matrix
 from scipy.stats import false_discovery_control
 from tqdm import tqdm
 
-tools_logger = logging.getLogger(__name__)
+from .kernel import rank_sum_chunk_kernel_float, rank_sum_chunk_kernel_hist
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+SUPPORTED_METRICS = ["wilcoxon", "wilcoxon-hist"]
 
-@njit(cache=True, fastmath=True, parallel=True, boundscheck=False)
-def _merge_many_sorted_numba(ref2: np.ndarray, tar2: np.ndarray) -> np.ndarray:
-    """Batch merge and scan for Mann-Whitney U test computation.
-    
-    Performs efficient batch merging of sorted arrays for statistical computation.
-    Optimized version with disabled bounds checking and optimized memory access patterns.
+
+
+
+# -- Worker Functions for Multiprocessing --
+
+def _chunk_worker(args) -> None:
+    """
+    Chunk worker for multiprocessing support.
     
     Args:
-        ref2: Reference group data with shape [B, n_ref], any numeric dtype, C-contiguous
-        tar2: Target group data with shape [B, n_tar], any numeric dtype, C-contiguous
-        
-    Returns:
-        out: Array with shape [B, 3] (float64) containing:
-            - [:, 0]: U1 statistics
-            - [:, 1]: tie_sum for tie correction
-            - [:, 2]: has_ties flag (0/1 stored as float64)
+        args: Tuple containing worker specifications and task parameters
     """
-    B = ref2.shape[0]
-    out = np.empty((B, 3), dtype=np.float64)
-
-    for b in prange(B):
-        r = ref2[b]
-        t = tar2[b]
-        n2 = r.shape[0]
-        n1 = t.shape[0]
+    (data_spec, ref_spec, result_spec, task, metric, tie_correction, 
+     continuity_correction, use_asymptotic, max_bins) = args
+    
+    import multiprocessing.shared_memory as shm
+    
+    data_shm = None
+    ref_shm = None  
+    result_shm = None
+    
+    try:
+        # Open shared memory
+        data_shm = shm.SharedMemory(name=data_spec['name'])
+        ref_shm = shm.SharedMemory(name=ref_spec['name'])
+        result_shm = shm.SharedMemory(name=result_spec['name'])
         
-        if n1 == 0 or n2 == 0:
-            out[b, 0] = 0.0
-            out[b, 1] = 0.0
-            out[b, 2] = 0.0
-            continue
+        # Create numpy arrays
+        X_dense = np.ndarray(data_spec['shape'], dtype=data_spec['dtype'], buffer=data_shm.buf)
+        ref_data_sorted = np.ndarray(ref_spec['shape'], dtype=ref_spec['dtype'], buffer=ref_shm.buf)
+        result_array = np.ndarray(result_spec['shape'], dtype=result_spec['dtype'], buffer=result_shm.buf)
         
-        i = 0
-        k = 0
-        running = 1.0
-        rank_sum_t = 0.0
-        tie_sum = 0.0
-        has_ties = 0.0
-
-        while i < n2 or k < n1:
-            if k >= n1:
-                v = r[i]
-            elif i >= n2:
-                v = t[k]
-            elif t[k] <= r[i]:
-                v = t[k]
-            else:
-                v = r[i]
-
-            cr = 0
-            ct = 0
+        group_idx, gene_start, gene_end, group_indices = task
+        n_genes_total = data_spec['shape'][1]
+        
+        # Extract target data for this chunk
+        target_data_dense = X_dense[group_indices]  # (n_target_cells, n_genes_total)
+        n_genes_chunk = gene_end - gene_start
+        
+        # Prepare data based on metric type and compute
+        if metric == "wilcoxon":
+            # Float kernel expects pre-sorted data, shape (n_genes, n_cells)
+            ref_chunk = ref_data_sorted[:, gene_start:gene_end].T  # (n_genes_chunk, n_ref_cells)
+            tar_chunk = np.sort(target_data_dense[:, gene_start:gene_end].T, axis=1)  # (n_genes_chunk, n_target_cells)
             
-            while i < n2 and r[i] == v:
-                cr += 1
-                i += 1
-            while k < n1 and t[k] == v:
-                ct += 1
-                k += 1
-
-            c = cr + ct
-            if c > 1:
-                has_ties = 1.0
-                tie_sum += c * (c * c - 1)
-
-            if ct > 0:
-                rank_sum_t += ct * (running + 0.5 * (c - 1))
-            running += c
-
-        U1 = rank_sum_t - 0.5 * n1 * (n1 + 1.0)
-        out[b, 0] = U1
-        out[b, 1] = tie_sum
-        out[b, 2] = has_ties
-
-    return out
-
-
-@njit(cache=True, fastmath=True, parallel=True, boundscheck=False)
-def _p_asymptotic_batch_numba(
-    U1: np.ndarray,
-    tie_sum: np.ndarray,
-    n1: int, 
-    n2: int,
-    tie_correction: int,
-    continuity_correction: int
-) -> np.ndarray:
-    """Compute asymptotic p-values for Mann-Whitney U test.
-    
-    Calculates p-values using normal approximation with optional tie and continuity corrections.
-    Optimized version with disabled bounds checking and precomputed constants.
-    
-    Args:
-        U1: U1 statistics array with shape [B], float64
-        tie_sum: Tie sum array for correction with shape [B], float64
-        n1: Sample size of target group
-        n2: Sample size of reference group
-        tie_correction: Whether to apply tie correction (0 or 1)
-        continuity_correction: Whether to apply continuity correction (0 or 1)
+            chunk_p, chunk_u = rank_sum_chunk_kernel_float(
+                ref_chunk, tar_chunk,
+                tie_correction=tie_correction,
+                continuity_correction=continuity_correction,
+                use_asymptotic=use_asymptotic
+            )
         
-    Returns:
-        p: P-values array with shape [B], float64, clipped to [0, 1]
-    """
-    B = U1.shape[0]
-    p = np.empty(B, dtype=np.float64)
-
-    N = n1 + n2
-    if N <= 1 or n1 == 0 or n2 == 0:
-        p.fill(1.0)
-        return p
-    
-    mu = 0.5 * n1 * n2
-    base = (n1 * n2) * (N + 1.0) / 12.0
-    use_tie = (tie_correction == 1) and (N > 1)
-    k_tie = (n1 * n2) / (12.0 * N * (N - 1.0)) if use_tie else 0.0
-    use_cc = (continuity_correction == 1)
-    inv_sqrt2 = 0.7071067811865475  # 1.0 / math.sqrt(2.0) precomputed
-
-    for i in prange(B):
-        sigma2 = base - k_tie * tie_sum[i] if use_tie else base
-        
-        if sigma2 <= 0.0 or not np.isfinite(sigma2):
-            p[i] = 1.0
-            continue
-
-        num = U1[i] - mu
-        if use_cc and num != 0.0:
-            # avoid branch prediction
-            num = num - 0.5 if num > 0.0 else num + 0.5
-
-        # often used operation, calculate square root first
-        sqrt_sigma2 = math.sqrt(sigma2)
-        zabs = abs(num) / sqrt_sigma2
-        pj = math.erfc(zabs * inv_sqrt2)   # two-sided
-        
-        if not np.isfinite(pj) or pj > 1.0:
-            pj = 1.0
-        elif pj < 0.0:
-            pj = 0.0
+        elif metric == "wilcoxon-hist":
+            # Hist kernel expects unsorted data, shape (n_genes, n_cells)
+            ref_chunk = ref_data_sorted[:, gene_start:gene_end].T  # (n_genes_chunk, n_ref_cells)
+            tar_chunk = target_data_dense[:, gene_start:gene_end].T  # (n_genes_chunk, n_target_cells)
             
-        p[i] = pj
-    return p
-
-
-@njit(cache=True)
-def _exact_tail_table(n1: int, n2: int) -> np.ndarray:
-    """Compute exact tail probabilities for Mann-Whitney U test.
-    
-    Calculates survival function sf[k] = P(U >= k) for exact p-value computation.
-    Uses dynamic programming with pure ndarray operations for robustness.
-    
-    Args:
-        n1: Sample size of target group
-        n2: Sample size of reference group
+            # Use the histogram kernel implementation - it has its own pool management
+            chunk_p, chunk_u = rank_sum_chunk_kernel_hist(
+                ref_chunk, tar_chunk.astype(np.int64),
+                tie_correction=tie_correction,
+                continuity_correction=continuity_correction,
+                use_asymptotic=use_asymptotic,
+                max_bins=max_bins
+            )
         
-    Returns:
-        sf: Survival function array with length Ucap+1, where Ucap = n1 * n2
-    """
-    m, n = n1, n2
-    Ucap = m * n
-
-    f_prev = np.zeros((n + 1, Ucap + 1), dtype=np.int64)
-    f_curr = np.zeros_like(f_prev)
-
-    for j in range(n + 1):
-        f_prev[j, 0] = 1
-
-    for i in range(1, m + 1):
-        # 清空
-        for j in range(n + 1):
-            for k in range(Ucap + 1):
-                f_curr[j, k] = 0
-        f_curr[0, 0] = 1
-
-        cap = i * n
-        for j in range(1, n + 1):
-            for k in range(j):
-                f_curr[j, k] = f_curr[j - 1, k]
-            for k in range(j, cap + 1):
-                f_curr[j, k] = f_curr[j - 1, k] + f_prev[j, k - j]
-
-        f_prev, f_curr = f_curr, f_prev
-
-    counts = f_prev[n] # [Ucap+1]
-    total = 0
-    for k in range(Ucap + 1):
-        total += counts[k]
-
-    sf = np.empty(Ucap + 1, dtype=np.float64)
-    acc = 0
-    for k in range(Ucap, -1, -1):
-        acc += counts[k]
-        sf[k] = acc / float(total)
-    return sf
-
-
-def _assert_supported_dtype(arr: np.ndarray) -> None:
-    """Validate array dtype for numerical computation.
-    
-    Explicitly rejects float16 for Numba compatibility and numerical stability.
-    Allows common numeric dtypes: int16, int32, float32, float64.
-    
-    Args:
-        arr: Input array to validate
+        # Store results in shared memory
+        p_start = group_idx * n_genes_total + gene_start
+        u_start = len(result_spec['group_counts']) * n_genes_total + group_idx * n_genes_total + gene_start
         
-    Raises:
-        TypeError: If dtype is not supported
-    """
-    if arr.dtype == np.float16:
-        raise TypeError("float16 is not supported (Numba & numerical stability).")
-    if not (np.issubdtype(arr.dtype, np.integer) or np.issubdtype(arr.dtype, np.floating)):
-        raise TypeError(f"Unsupported dtype {arr.dtype}.")
-
-
-# -- comman rank sum kernel
-def rank_sum_chunk_kernel_float(
-    ref_sorted: np.ndarray,
-    tar_sorted: np.ndarray,
-    tie_correction: bool = True,
-    continuity_correction: bool = True,
-    use_asymptotic: Optional[bool] = None,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Compute Mann-Whitney U test using floating-point algorithm.
-    
-    Memory-optimized version that preserves input dtype while using float64 for 
-    intermediate computations. Supports int16/int32/float32/float64 input dtypes.
-    
-    Args:
-        ref_sorted: Reference group data with shape [..., n_ref], sorted ascending
-        tar_sorted: Target group data with shape [..., n_tar], sorted ascending
-        tie_correction: Whether to apply tie correction
-        continuity_correction: Whether to apply continuity correction
-        use_asymptotic: Force asymptotic approximation. None for auto-selection
+        result_array[p_start:p_start + n_genes_chunk] = chunk_p
+        result_array[u_start:u_start + n_genes_chunk] = chunk_u
         
-    Returns:
-        Tuple of (p_values, U_statistics) with same leading dimensions as input
-        
-    Raises:
-        ValueError: If leading dimensions don't match
-        TypeError: If unsupported dtype is used
-    """
-    _assert_supported_dtype(ref_sorted)
-    _assert_supported_dtype(tar_sorted)
-
-    raw_ref_shape = ref_sorted.shape
-    raw_tar_shape = tar_sorted.shape
-    if raw_ref_shape[:-1] != raw_tar_shape[:-1]:
-        raise ValueError("Leading shapes must match for ref_sorted and tar_sorted")
-
-    # ensure 2D + C-contiguous
-    ref2 = np.ascontiguousarray(ref_sorted.reshape(-1, raw_ref_shape[-1]))
-    tar2 = np.ascontiguousarray(tar_sorted.reshape(-1, raw_tar_shape[-1]))
-
-    # -- 1. batch merge (compute result vector using float64)
-    out = _merge_many_sorted_numba(ref2, tar2)  # [B,3] float64
-    U1 = out[:, 0]
-    tie_sum = out[:, 1]
-    has_ties = out[:, 2].astype(np.int64)
-
-    n_ref = ref2.shape[1]
-    n_tar = tar2.shape[1]
-
-    # -- 2. method selection
-    if use_asymptotic is None:
-        use_asym = (np.any(has_ties != 0)) or (min(n_ref, n_tar) > 8)
-    else:
-        use_asym = bool(use_asymptotic)
-
-    # -- 3. compute p (float64 vector)
-    if use_asym:
-        p = _p_asymptotic_batch_numba(
-            U1, tie_sum, n_tar, n_ref,
-            1 if tie_correction else 0,
-            1 if continuity_correction else 0,
-        )
-    else:
-        total_U = int(n_ref * n_tar)
-        U2 = total_U - U1
-        # with method "exact", U should be integer; use rint→int to avoid potential overflow
-        Umax_idx = np.rint(np.maximum(U1, U2)).astype(np.int64)
-        sf = _exact_tail_table(n_tar, n_ref)  # float64
-        p = 2.0 * sf[Umax_idx]
-        np.clip(p, 0.0, 1.0, out=p)
-
-    out_shape = raw_ref_shape[:-1]
-    return p.reshape(out_shape), U1.reshape(out_shape)
+    except Exception as e:
+        logger.warning(f"Worker failed on task {task}: {e}")
+    finally:
+        # Clean up shared memory handles
+        for memory in [data_shm, ref_shm, result_shm]:
+            if memory is not None:
+                try:
+                    memory.close()
+                except:
+                    pass
 
 
-def _assert_integer_dtype(arr: np.ndarray) -> None:
-    if not np.issubdtype(arr.dtype, np.integer) or arr.dtype == np.bool_:
-        raise TypeError(f"hist kernel expects integer dtype, got {arr.dtype}")
-    if arr.dtype == np.int8 or arr.dtype == np.uint8:
-        # Small count types may overflow/truncate on large samples, recommend at least int16
-        pass  # Allow but could be upgraded
-
-
-# -- histogram kernel
-@njit(cache=True, fastmath=True, parallel=True, boundscheck=False)
-def _hist_merge_and_stats_kernel(
-    ref2: np.ndarray,
-    tar2: np.ndarray,
-    vmin: int,
-    Kp1: int,
-    pool_cnt: np.ndarray, 
-    pool_cnt_t: np.ndarray
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Histogram-based Mann-Whitney U test computation kernel.
+def _create_tasks(n_genes: int, group_rows: List[np.ndarray], chunk_size: int) -> List[Tuple]:
+    """Create simple task list for multiprocessing."""
+    tasks = []
     
-    Efficiently computes U statistics and tie information using histogram binning
-    for integer data. Optimized version with disabled bounds checking and 
-    optimized memory access patterns.
+    for group_idx, group_indices in enumerate(group_rows):
+        gene_start = 0
+        while gene_start < n_genes:
+            gene_end = min(n_genes, gene_start + chunk_size)
+            tasks.append((group_idx, gene_start, gene_end, group_indices))
+            gene_start = gene_end
     
-    Args:
-        ref2: Reference group data with shape [B, n_ref], integer dtype
-        tar2: Target group data with shape [B, n_tar], integer dtype
-        vmin: Global minimum value (used for offset)
-        Kp1: Global number of bins (vmax - vmin + 1)
-        pool_cnt: Thread-private buffer for counts with shape [nthreads, Kp1], int64
-        pool_cnt_t: Thread-private buffer for target counts with shape [nthreads, Kp1], int64
-        
-    Returns:
-        Tuple of (U1, tie_sum, has_ties) where:
-            - U1: U statistics array with shape [B], float64
-            - tie_sum: Tie sum array for correction with shape [B], float64
-            - has_ties: Tie flag array with shape [B], int64 (0/1)
-    """
-    B = ref2.shape[0]
-    n_ref = ref2.shape[1]
-    n_tar = tar2.shape[1]
-
-    U = np.empty(B, dtype=np.float64)
-    tie = np.empty(B, dtype=np.float64)
-    has = np.zeros(B, dtype=np.int64)
-
-    for b in prange(B):
-        tid = get_thread_id()
-        cnt = pool_cnt[tid]
-        cnt_t = pool_cnt_t[tid]
-
-        # Optimization: Use larger initial value and smaller initial value
-        min_idx = Kp1
-        max_idx = -1
-
-        # Process tar data first, updating both counters simultaneously
-        for i in range(n_tar):
-            idx = tar2[b, i] - vmin  # Direct integer arithmetic
-            cnt[idx] += 1
-            cnt_t[idx] += 1
-            # Optimization: min/max updates
-            if idx < min_idx: 
-                min_idx = idx
-            if idx > max_idx: 
-                max_idx = idx
-
-        # Process ref data
-        for i in range(n_ref):
-            idx = ref2[b, i] - vmin
-            cnt[idx] += 1
-            if idx < min_idx: 
-                min_idx = idx
-            if idx > max_idx: 
-                max_idx = idx
-
-        # Early exit check
-        if max_idx < min_idx or n_tar == 0 or n_ref == 0:
-            U[b] = 0.0
-            tie[b] = 0.0
-            has[b] = 0
-            continue
-
-        running = 1
-        rank_sum_t = 0.0
-        tie_sum = 0.0
-        has_tie_flag = 0
-
-        # Optimized statistical computation loop
-        for v in range(min_idx, max_idx + 1):
-            c = cnt[v]
-            if c > 0:
-                # Optimization: Direct average rank calculation
-                avg_rank = running + (c - 1) * 0.5
-                rank_sum_t += cnt_t[v] * avg_rank
-                
-                # Optimization: tie calculation
-                if c > 1:
-                    tie_sum += c * (c - 1) * (c + 1)
-                    has_tie_flag = 1
-                    
-                running += c
-
-        # Final calculation
-        U1 = rank_sum_t - 0.5 * n_tar * (n_tar + 1)
-        U[b] = U1
-        tie[b] = tie_sum
-        has[b] = has_tie_flag
-
-        # Fast cleanup of touched bins - memset would be better but numba doesn't support it
-        for v in range(min_idx, max_idx + 1):
-            cnt[v] = 0
-            cnt_t[v] = 0
-
-    return U, tie, has
+    return tasks
 
 
-# -- Histogram Kernel
-def rank_sum_chunk_kernel_hist(
-    ref_sorted: np.ndarray,
-    tar: np.ndarray,
-    tie_correction: bool = True,
-    continuity_correction: bool = True,
-    use_asymptotic: Optional[bool] = None,
-    max_bins: int = 200_000,
-    float_dtype: np.dtype = np.float64,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Compute Mann-Whitney U test using histogram algorithm for integer data.
+def _create_shared_memory(X_dense: np.ndarray, ref_data_sorted: np.ndarray, 
+                                group_rows: List[np.ndarray], n_genes: int) -> Tuple:
+    """Create shared memory for simple multiprocessing."""
+    from multiprocessing.shared_memory import SharedMemory
+
+    # Create shared memory for main data
+    data_shm = SharedMemory(create=True, size=X_dense.nbytes)
+    data_array = np.ndarray(X_dense.shape, dtype=X_dense.dtype, buffer=data_shm.buf)
+    data_array[:] = X_dense
+    data_spec = {'name': data_shm.name, 'shape': X_dense.shape, 'dtype': X_dense.dtype}
     
-    Efficient histogram-based computation for integer data that automatically
-    falls back to floating-point algorithm when value range is too large.
+    # Create shared memory for pre-sorted reference
+    ref_shm = SharedMemory(create=True, size=ref_data_sorted.nbytes)
+    ref_array = np.ndarray(ref_data_sorted.shape, dtype=ref_data_sorted.dtype, buffer=ref_shm.buf)
+    ref_array[:] = ref_data_sorted
+    ref_spec = {'name': ref_shm.name, 'shape': ref_data_sorted.shape, 'dtype': ref_data_sorted.dtype}
     
-    Args:
-        ref_sorted: Reference group data with shape [..., n_ref], integer dtype, sorted
-        tar: Target group data with shape [..., n_tar], integer dtype, may not be sorted
-        tie_correction: Whether to apply tie correction
-        continuity_correction: Whether to apply continuity correction
-        use_asymptotic: Force asymptotic approximation. None for auto-selection
-        max_bins: Maximum number of bins before falling back to float algorithm
-        float_dtype: Data type for fallback to float algorithm
-        
-    Returns:
-        Tuple of (p_values, U_statistics) with same leading dimensions as input
-        
-    Raises:
-        ValueError: If leading dimensions don't match
-        TypeError: If unsupported dtype is used
-    """
-    _assert_integer_dtype(ref_sorted)
-    _assert_integer_dtype(tar)
-
-    raw_ref_shape = ref_sorted.shape
-    raw_tar_shape = tar.shape
-    if raw_ref_shape[:-1] != raw_tar_shape[:-1]:
-        raise ValueError("Leading shapes must match for ref_sorted and tar")
-
-    # Ensure 2D + C-contiguous, don't change dtype
-    ref2 = np.ascontiguousarray(ref_sorted.reshape(-1, raw_ref_shape[-1]))
-    tar2 = np.ascontiguousarray(tar.reshape(-1, raw_tar_shape[-1]))
-
-    B = ref2.shape[0]
-    n_ref = ref2.shape[1]
-    n_tar = tar2.shape[1]
-
-    # Calculate global value range
-    vmin_ref = int(np.min(ref2)) if n_ref > 0 else 0
-    vmax_ref = int(np.max(ref2)) if n_ref > 0 else 0
-    vmin_tar = int(np.min(tar2)) if n_tar > 0 else 0
-    vmax_tar = int(np.max(tar2)) if n_tar > 0 else 0
-
-    vmin = vmin_ref if vmin_ref < vmin_tar else vmin_tar
-    vmax = vmax_ref if vmax_ref > vmax_tar else vmax_tar
-    Kp1 = int(vmax - vmin + 1) if (n_ref > 0 and n_tar > 0) else 1
-
-    # Value range too large: fallback to "float merge kernel" - needs sorting (ref already sorted, tar needs sorting)
-    if Kp1 > max_bins:
-        ref_f = np.ascontiguousarray(ref2, dtype=float_dtype) # Already sorted, no need to sort
-        tar_f = np.ascontiguousarray(tar2, dtype=float_dtype)
-        tar_f = np.sort(tar_f, axis=1) # Only sort tar
-
-        p, U = rank_sum_chunk_kernel_float(
-            ref_f, tar_f,
-            tie_correction=tie_correction,
-            continuity_correction=continuity_correction,
-            use_asymptotic=True, # Fallback scenarios usually have large samples/many ties, force approximation for stability
-        )
-        out_shape = raw_ref_shape[:-1]
-        return p.reshape(out_shape), U.reshape(out_shape)
-
-    # -- Normal histogram path
-    nthreads = get_num_threads()
-    pool_cnt = np.zeros((nthreads, Kp1), dtype=np.int64)
-    pool_cnt_t = np.zeros((nthreads, Kp1), dtype=np.int64)
-
-    U1, tie_sum, has_ties = _hist_merge_and_stats_kernel(
-        ref2, tar2, vmin, Kp1, pool_cnt, pool_cnt_t
-    )
-
-    if use_asymptotic is None:
-        use_asym = (np.any(has_ties != 0)) or (min(n_ref, n_tar) > 8)
-    else:
-        use_asym = bool(use_asymptotic)
-
-    if use_asym:
-        p = _p_asymptotic_batch_numba(
-            U1, tie_sum, n_tar, n_ref,
-            1 if tie_correction else 0,
-            1 if continuity_correction else 0
-        )
-    else:
-        total_U = int(n_ref * n_tar)
-        U2 = total_U - U1
-        Umax_idx = np.rint(np.maximum(U1, U2)).astype(np.int64)
-        sf = _exact_tail_table(n_tar, n_ref)
-        p = 2.0 * sf[Umax_idx]
-        np.clip(p, 0.0, 1.0, out=p)
-
-    out_shape = raw_ref_shape[:-1]
-    return p.reshape(out_shape), U1.reshape(out_shape)
-
-
-def _to_csc(X: Union[csc_matrix, csr_matrix, np.ndarray]) -> csc_matrix:
-    """Convert input to CSC matrix format.
-    
-    Args:
-        X: Input matrix (CSC, CSR, or dense array)
-        
-    Returns:
-        CSC matrix
-    """
-    if isinstance(X, csc_matrix):
-        return X
-    if isinstance(X, csr_matrix):
-        return X.tocsc()
-    return csc_matrix(np.asarray(X))
-
-
-def _create_shared_csc(X: Union[csc_matrix, csr_matrix, np.ndarray]) -> Tuple[Dict, List[SharedMemory]]:
-    """Create shared CSC matrix (optimized version).
-    
-    Args:
-        X: Input matrix to convert to shared CSC format
-        
-    Returns:
-        Tuple of (spec, shms) containing shared memory specifications and handles
-    """
-    Xc = _to_csc(X)
-    
-    # Optimization: Only copy data when necessary
-    data = Xc.data if Xc.data.flags.c_contiguous else np.ascontiguousarray(Xc.data)
-    indices = Xc.indices if Xc.indices.flags.c_contiguous else np.ascontiguousarray(Xc.indices)
-    indptr = Xc.indptr if Xc.indptr.flags.c_contiguous else np.ascontiguousarray(Xc.indptr)
-
-    # Pre-compute sizes and element sizes
-    data_itemsize = data.dtype.itemsize
-    indices_itemsize = indices.dtype.itemsize
-    indptr_itemsize = indptr.dtype.itemsize
-    
-    shm_data = SharedMemory(create=True, size=data.nbytes)
-    shm_idx  = SharedMemory(create=True, size=indices.nbytes)
-    shm_ptr  = SharedMemory(create=True, size=indptr.nbytes)
-
-    # Optimization: Direct memory view for block copying
-    shared_data = np.ndarray(data.shape, data.dtype, buffer=shm_data.buf)
-    shared_indices = np.ndarray(indices.shape, indices.dtype, buffer=shm_idx.buf)
-    shared_indptr = np.ndarray(indptr.shape, indptr.dtype, buffer=shm_ptr.buf)
-    
-    shared_data[:] = data
-    shared_indices[:] = indices
-    shared_indptr[:] = indptr
-
-    spec = {
-        'shape': Xc.shape, 'dtype': Xc.dtype,
-        'data_shm': shm_data.name, 'indices_shm': shm_idx.name, 'indptr_shm': shm_ptr.name,
-        'data_itemsize': data_itemsize, 'indices_itemsize': indices_itemsize, 'indptr_itemsize': indptr_itemsize,
-        'data_len': len(data), 'indices_len': len(indices), 'indptr_len': len(indptr)
-    }
-    return spec, [shm_data, shm_idx, shm_ptr]
-
-
-def _open_shared_csc(spec: Dict) -> Tuple[csc_matrix, List[SharedMemory]]:
-    """Open shared CSC matrix (optimized version).
-    
-    Args:
-        spec: Shared memory specification dictionary
-        
-    Returns:
-        Tuple of (csc_matrix, shared_memory_handles)
-    """
-    shm_data = SharedMemory(name=spec['data_shm'])
-    shm_idx  = SharedMemory(name=spec['indices_shm'])
-    shm_ptr  = SharedMemory(name=spec['indptr_shm'])
-    
-    # Optimization: Use pre-stored lengths and element sizes to avoid repeated calculations
-    data = np.ndarray((spec['data_len'],), dtype=spec['dtype'], buffer=shm_data.buf)
-    indices = np.ndarray((spec['indices_len'],), dtype=np.int32, buffer=shm_idx.buf)
-    indptr  = np.ndarray((spec['indptr_len'],), dtype=np.int32, buffer=shm_ptr.buf)
-    
-    # copy=False to avoid unnecessary data copying
-    Xc = csc_matrix((data, indices, indptr), shape=spec['shape'], copy=False)
-    return Xc, [shm_data, shm_idx, shm_ptr]
-
-
-def _create_shared_ref_sorted(ref_data_sorted: np.ndarray) -> Tuple[Dict, List[SharedMemory]]:
-    """Create shared memory for pre-sorted reference group data.
-    
-    Args:
-        ref_data_sorted: Pre-sorted reference group data with shape (n_genes, n_ref_samples)
-        
-    Returns:
-        Tuple of (spec, shms) where:
-            - spec: Dictionary containing shared memory specifications
-            - shms: List of SharedMemory objects for cleanup
-    """
-    # Ensure data is C-contiguous
-    if not ref_data_sorted.flags.c_contiguous:
-        ref_data_sorted = np.ascontiguousarray(ref_data_sorted)
-    
-    # Create shared memory
-    nbytes = ref_data_sorted.nbytes
-    shm_data = SharedMemory(create=True, size=nbytes)
-    
-    # Copy data to shared memory
-    shared_array = np.ndarray(ref_data_sorted.shape, dtype=ref_data_sorted.dtype, buffer=shm_data.buf)
-    shared_array[:] = ref_data_sorted
-    
-    spec = {
-        'data_shm': shm_data.name,
-        'shape': ref_data_sorted.shape,
-        'dtype': ref_data_sorted.dtype,
-        'nbytes': nbytes
+    # Create shared memory for results (p-values + u-statistics)
+    total_results = len(group_rows) * n_genes * 2  # p-values + u-statistics
+    result_shm = SharedMemory(create=True, size=total_results * 8)  # float64
+    result_array = np.ndarray((total_results,), dtype=np.float64, buffer=result_shm.buf)
+    result_array.fill(np.nan)
+    result_spec = {
+        'name': result_shm.name, 
+        'shape': (total_results,), 
+        'dtype': np.float64,
+        'group_counts': [len(rows) for rows in group_rows]
     }
     
-    return spec, [shm_data]
+    return (data_shm, ref_shm, result_shm), (data_spec, ref_spec, result_spec)
 
 
-def _open_shared_ref_sorted(spec: Dict) -> Tuple[np.ndarray, List[SharedMemory]]:
-    """Open shared pre-sorted reference group data.
-    
-    Args:
-        spec: Shared memory specification dictionary
-        
-    Returns:
-        Tuple of (ref_data_sorted, shared_memory_handles)
-    """
-    shm_data = SharedMemory(name=spec['data_shm'])
-    
-    ref_data_sorted = np.ndarray(spec['shape'], dtype=spec['dtype'], buffer=shm_data.buf)
-    
-    return ref_data_sorted, [shm_data]
 
 
-def _close_shared_memory(shms: Iterable[SharedMemory]) -> None:
-    """Safely close and release shared memory.
-    
-    Args:
-        shms: Iterable of SharedMemory objects to close
-    """
-    for s in shms:
-        try:
-            s.close()
-            s.unlink()
-        except (FileNotFoundError, OSError):
-            pass
 
 def _create_presorted_ref_data(adata: ad.AnnData, ref_rows: np.ndarray) -> np.ndarray:
     """Create pre-sorted reference group data (optimized version).
@@ -715,98 +197,67 @@ def _create_presorted_ref_data(adata: ad.AnnData, ref_rows: np.ndarray) -> np.nd
     return ref_data_sorted
 
 
-def _compute_fold_change(adata: ad.AnnData, ref_rows: np.ndarray, target_rows_list: List[np.ndarray], clip_value: float = 20.0) -> np.ndarray:
-    """Compute fold change matrix aligned with pdex calculation method.
-    
-    Optimized version for computing fold changes between target groups and reference group.
-    
-    Args:
-        adata: AnnData object containing expression data
-        ref_rows: Row indices for reference group
-        target_rows_list: List of row indices for each target group
-        
-    Returns:
-        Fold change matrix with shape (n_groups, n_genes)
+def _compute_fold_changes(target_means: np.ndarray, ref_means: np.ndarray, 
+                              clip_value: float = 20.0) -> np.ndarray:
     """
-    n_groups = len(target_rows_list)
-    n_genes = adata.n_vars
-    fc_matrix = np.empty((n_groups, n_genes), dtype=np.float64)
+    Safely compute fold changes with proper handling of edge cases.
     
-    # Calculate reference group mean expression once
-    if hasattr(adata.X, 'toarray'):  # Sparse matrix
-        ref_mean = np.asarray(adata.X[ref_rows, :].mean(axis=0)).ravel()
-    else:  # Dense matrix
-        ref_mean = adata.X[ref_rows, :].mean(axis=0)
-        if ref_mean.ndim > 1:
-            ref_mean = ref_mean.ravel()
-    
-    # Pre-compute reference group zero positions to avoid repeated checks in loop
-    ref_zero_mask = (ref_mean == 0)
-    
-    # Batch calculate mean expression for all target groups
-    if hasattr(adata.X, 'toarray'):  # Sparse matrix
-        for i, target_rows in enumerate(target_rows_list):
-            target_mean = np.asarray(adata.X[target_rows, :].mean(axis=0)).ravel()
-            
-            # Optimized fold change calculation
-            with np.errstate(divide="ignore", invalid="ignore"):
-                fc = target_mean / ref_mean
-                # Handle special cases with configurable clip_value:
-                # Use a small tolerance for zero comparison to handle floating point precision
-                ref_zero_mask_tol = (ref_mean < 1e-10)
-                target_zero_mask_tol = (target_mean < 1e-10)
-                
-                # 1. If ref_mean ≈ 0 and target_mean ≈ 0: set to clip_value (for pdex alignment)
-                # 2. If ref_mean ≈ 0 and target_mean > 0: set to np.inf
-                # 3. If target_mean ≈ 0 and ref_mean > 0: set to 0.0
-                fc = np.where(ref_zero_mask_tol & target_zero_mask_tol, clip_value, fc)
-                fc = np.where(ref_zero_mask_tol & ~target_zero_mask_tol, np.inf, fc)
-                fc = np.where(target_zero_mask_tol & ~ref_zero_mask_tol, 0.0, fc)
-            
-            fc_matrix[i, :] = fc
-    else:  # Dense matrix
-        for i, target_rows in enumerate(target_rows_list):
-            target_mean = adata.X[target_rows, :].mean(axis=0)
-            if target_mean.ndim > 1:
-                target_mean = target_mean.ravel()
-            
-            # Optimized fold change calculation
-            with np.errstate(divide="ignore", invalid="ignore"):
-                fc = target_mean / ref_mean
-                # Handle special cases with configurable clip_value:
-                # Use a small tolerance for zero comparison to handle floating point precision
-                ref_zero_mask_tol = (ref_mean < 1e-10)
-                target_zero_mask_tol = (target_mean < 1e-10)
-                
-                # 1. If ref_mean ≈ 0 and target_mean ≈ 0: set to clip_value (for pdex alignment)
-                # 2. If ref_mean ≈ 0 and target_mean > 0: set to np.inf
-                # 3. If target_mean ≈ 0 and ref_mean > 0: set to 0.0
-                fc = np.where(ref_zero_mask_tol & target_zero_mask_tol, clip_value, fc)
-                fc = np.where(ref_zero_mask_tol & ~target_zero_mask_tol, np.inf, fc)
-                fc = np.where(target_zero_mask_tol & ~ref_zero_mask_tol, 0.0, fc)
-            
-            fc_matrix[i, :] = fc
-    
-    return fc_matrix
-
-
-def _compute_log2_fold_change(fc_matrix: np.ndarray) -> np.ndarray:
-    """Compute log2 fold change matrix.
+    This is the optimized version that handles all edge cases properly:
+    - Reference mean ≈ 0 and target mean ≈ 0: set to clip_value
+    - Reference mean ≈ 0 and target mean > 0: set to +inf  
+    - Target mean ≈ 0 and reference mean > 0: set to 0.0
+    - Normal case: target_mean / ref_mean
     
     Args:
-        fc_matrix: Fold change matrix
+        target_means: Mean expression in target group(s), shape (..., n_genes)
+        ref_means: Mean expression in reference group, shape (n_genes,) or (..., n_genes)
+        clip_value: Value to use when both means are close to zero
         
     Returns:
-        Log2 fold change matrix
+        Fold changes array with same shape as target_means
+    """
+    # Ensure inputs are numpy arrays
+    target_means = np.asarray(target_means)
+    ref_means = np.asarray(ref_means)
+    
+    # Handle broadcasting
+    if ref_means.ndim == 1 and target_means.ndim > 1:
+        ref_means = np.broadcast_to(ref_means, target_means.shape)
+    
+    # Use tolerance for zero comparison to handle floating point precision
+    ref_zero_mask = (ref_means < 1e-10)
+    target_zero_mask = (target_means < 1e-10)
+    
+    # Calculate fold changes with proper error handling
+    with np.errstate(divide="ignore", invalid="ignore"):
+        fc = target_means / ref_means
+        
+        # Handle special cases:
+        # 1. If ref_mean ≈ 0 and target_mean ≈ 0: set to clip_value (for consistency)
+        # 2. If ref_mean ≈ 0 and target_mean > 0: set to np.inf
+        # 3. If target_mean ≈ 0 and ref_mean > 0: set to 0.0
+        fc = np.where(ref_zero_mask & target_zero_mask, clip_value, fc)
+        fc = np.where(ref_zero_mask & ~target_zero_mask, np.inf, fc)
+        fc = np.where(target_zero_mask & ~ref_zero_mask, 0.0, fc)
+    
+    return fc
+
+
+def _compute_log2_fold_change(fc_values: np.ndarray) -> np.ndarray:
+    """
+    Compute log2 fold changes from pre-processed fold change values.
+    
+    Since fold changes are already properly handled by _compute_fold_changes_safe 
+    (including clipping and edge case handling), this function can be simple.
+    
+    Args:
+        fc_values: Fold change values that have been pre-processed
+        
+    Returns:
+        Log2 fold changes with same shape as input
     """
     with np.errstate(divide="ignore", invalid="ignore"):
-        log2_fc = np.log2(fc_matrix)
-        # Handle special cases
-        log2_fc = np.where(fc_matrix == 0, -np.inf, log2_fc)  # log2(0) = -∞
-        log2_fc = np.where(np.isnan(fc_matrix), np.nan, log2_fc)  # Preserve NaN
-        log2_fc = np.where(np.isinf(fc_matrix) & (fc_matrix > 0), np.inf, log2_fc)  # log2(∞) = ∞
-    
-    return log2_fc
+        return np.log2(fc_values)
 
 
 def _compute_fdr(p_matrix: np.ndarray, method: str = 'fdr_bh') -> np.ndarray:
@@ -848,295 +299,243 @@ def _compute_fdr(p_matrix: np.ndarray, method: str = 'fdr_bh') -> np.ndarray:
     except Exception as e:
         logging.warning(f"FDR correction failed, using original p-values: {e}")
         return p_matrix.copy()
-    
 
-def _create_shared_results(total_len: int) -> Tuple[Dict, List[SharedMemory]]:
-    """Create shared memory for result vectors.
-    
-    Args:
-        total_len: Total length of result vectors
-        
-    Returns:
-        Tuple of (spec, shms) containing shared memory specifications and handles
+
+# Note: Histogram pools are thread-local within each process
+# No shared memory needed - each worker process creates its own histogram pools
+# This avoids inter-process synchronization overhead while keeping memory usage reasonable
+
+
+def _auto_schedule_chunk_size(
+    n_genes: int,
+    n_groups: int,
+    num_workers: int,
+    data_size_mb: float
+) -> int:
     """
-    shm_p = SharedMemory(create=True, size=total_len * 8)  # float64
-    shm_u = SharedMemory(create=True, size=total_len * 8)  # float64
+    Automatically determine optimal chunk size based on data characteristics.
     
-    np.ndarray((total_len,), np.float64, buffer=shm_p.buf).fill(np.nan)
-    np.ndarray((total_len,), np.float64, buffer=shm_u.buf).fill(0.0)
-    
-    spec = {
-        'length': total_len,
-        'pval_shm': shm_p.name, 'stat_shm': shm_u.name,
-        'pval_nbytes': total_len*8, 'stat_nbytes': total_len*8
-    }
-    return spec, [shm_p, shm_u]
-
-
-def _open_shared_results(spec: Dict) -> Tuple[np.ndarray, np.ndarray, List[SharedMemory]]:
-    """Open shared result vectors.
+    Based on ablation study results:
+    - hpdex is insensitive to chunk size (CV < 0.05 in most cases)
+    - Can optimize purely for task distribution without performance penalty
     
     Args:
-        spec: Shared memory specification dictionary
-        
-    Returns:
-        Tuple of (p_values, u_statistics, shared_memory_handles)
-    """
-    shm_p = SharedMemory(name=spec['pval_shm'])
-    shm_u = SharedMemory(name=spec['stat_shm'])
-    p = np.ndarray((spec['length'],), np.float64, buffer=shm_p.buf)
-    u = np.ndarray((spec['length'],), np.float64, buffer=shm_u.buf)
-    return p, u, [shm_p, shm_u]
-
-
-def _create_shared_hist_pool(num_workers: int, max_bins: int) -> Tuple[Dict, List[SharedMemory]]:
-    """Create shared memory for histogram bin pools.
-    
-    Args:
+        n_genes: Number of genes
+        n_groups: Number of treatment groups (excluding reference)
         num_workers: Number of worker processes
-        max_bins: Maximum number of histogram bins
+        data_size_mb: Approximate data size in MB
         
     Returns:
-        Tuple of (spec, shms) containing shared memory specifications and handles
+        Optimal chunk size (number of gene-group combinations per chunk)
     """
-    pool_size = num_workers * max_bins * 8  # int64
-    temp_pool_size = num_workers * max_bins * 8  # int64
     
-    shm_pool = SharedMemory(create=True, size=pool_size)
-    shm_temp = SharedMemory(create=True, size=temp_pool_size)
+    total_tasks = n_genes * n_groups
     
-    np.ndarray((num_workers, max_bins), dtype=np.int64, buffer=shm_pool.buf).fill(0)
-    np.ndarray((num_workers, max_bins), dtype=np.int64, buffer=shm_temp.buf).fill(0)
-    
-    spec = {
-        'num_workers': num_workers, 'max_bins': max_bins,
-        'pool_shm': shm_pool.name, 'pool_temp_shm': shm_temp.name,
-        'pool_nbytes': pool_size, 'pool_temp_nbytes': temp_pool_size
-    }
-    return spec, [shm_pool, shm_temp]
-
-
-def _open_shared_hist_pool(spec: Dict) -> Tuple[np.ndarray, np.ndarray, List[SharedMemory]]:
-    """Open shared histogram bin pools.
-    
-    Args:
-        spec: Shared memory specification dictionary
+    # Strategy based on ablation study findings
+    if num_workers == 1:
+        # Single worker: use larger chunks to minimize overhead
+        # Ablation showed single-worker performance is excellent regardless of chunk size
+        chunk_size = total_tasks  # Single large chunk
+        logger.info(f"Auto-scheduling: Single worker mode, chunk_size={chunk_size}")
         
-    Returns:
-        Tuple of (pool, temp_pool, shared_memory_handles)
-    """
-    shm_pool = SharedMemory(name=spec['pool_shm'])
-    shm_temp = SharedMemory(name=spec['pool_temp_shm'])
-    
-    pool = np.ndarray((spec['num_workers'], spec['max_bins']), dtype=np.int64, buffer=shm_pool.buf)
-    temp_pool = np.ndarray((spec['num_workers'], spec['max_bins']), dtype=np.int64, buffer=shm_temp.buf)
-    
-    return pool, temp_pool, [shm_pool, shm_temp]
-
-
-def _make_chunks(n_genes: int, group_sizes: List[int], batch_budget: int, 
-                 use_hist: bool = False, min_cols: int = 16, max_cols: int = 1024) -> List[Tuple[int, int, int]]:
-    """Generate task list for parallel processing (optimized version).
-    
-    Args:
-        n_genes: Total number of genes
-        group_sizes: List of group sizes
-        batch_budget: Memory budget for batch processing
-        use_hist: Whether using histogram algorithm
-        min_cols: Minimum columns per chunk
-        max_cols: Maximum columns per chunk
-        
-    Returns:
-        List of (group_idx, col_start, col_end) tuples
-    """
-    tasks = []
-    
-    # Optimization: Pre-compute chunking strategy for all groups
-    chunk_strategies = []
-    for n_samp in group_sizes:
-        if use_hist:
-            # Histogram algorithm requires less memory
-            base_cols = max(1, batch_budget // max(1, n_samp // 2))
-        else:
-            # Floating-point algorithm needs more memory for sorting
-            base_cols = max(1, batch_budget // max(1, n_samp))
-        
-        cols_per_chunk = max(min_cols, min(base_cols, max_cols))
-        chunk_strategies.append(cols_per_chunk)
-    
-    # Optimization: Batch generate tasks based on strategy
-    for g, cols_per_chunk in enumerate(chunk_strategies):
-        start = 0
-        while start < n_genes:
-            end = min(n_genes, start + cols_per_chunk)
-            tasks.append((g, start, end))
-            start = end
-    
-    return tasks
-
-
-def _dense_block_from_csc(Xc: csc_matrix, row_idx: np.ndarray, c0: int, c1: int, dtype=np.float64) -> np.ndarray:
-    """Extract dense block from CSC matrix (optimized version).
-    
-    Returns dense block with shape (len(row_idx), c1-c0).
-    Optimization: Column slice first, then row slice to reduce intermediate sparse matrix creation.
-    
-    Args:
-        Xc: CSC sparse matrix
-        row_idx: Row indices to extract
-        c0: Start column index
-        c1: End column index
-        dtype: Output data type
-        
-    Returns:
-        Dense block array
-    """
-    # Optimization: Column slice first, then row slice, finally convert to dense
-    col_slice = Xc[:, c0:c1]          # Column slice, still CSC
-    row_col_slice = col_slice[row_idx, :]  # Row slice, keep sparse
-    
-    # Convert to dense once and specify type
-    if dtype == row_col_slice.dtype:
-        return row_col_slice.toarray()
     else:
-        return row_col_slice.toarray().astype(dtype, copy=False)
+        # Multi-worker: balance between parallelization and overhead
+        # Target 2-4 chunks per worker for good load balancing
+        target_chunks_per_worker = 3
+        
+        if data_size_mb < 50:  # Small dataset
+            target_chunks_per_worker = 2  # Fewer chunks to reduce overhead
+        elif data_size_mb > 500:  # Large dataset
+            target_chunks_per_worker = 4  # More chunks for better load balancing
+            
+        target_total_chunks = num_workers * target_chunks_per_worker
+        chunk_size = max(50, total_tasks // target_total_chunks)  # Minimum 50 tasks per chunk
+        
+        logger.info(f"Auto-scheduling: {num_workers} workers, target {target_chunks_per_worker} chunks/worker, "
+                   f"chunk_size={chunk_size}")
+    
+    return chunk_size
 
-
-def _worker_run_chunk(args) -> None:
-    """Worker function: Process single data chunk.
+def _estimate_data_size(adata: ad.AnnData) -> float:
+    """
+    Estimate data size in MB for auto-scheduling decisions.
     
     Args:
-        args: Tuple containing all necessary arguments for processing
+        adata: Input data
+        
+    Returns:
+        Estimated size in MB
     """
-    (csc_spec, results_spec, hist_pool_spec, ref_sorted_spec, target_rows_by_group,
-     n_genes, task, worker_id, metric, max_bins,
-     tie_correction, continuity_correction, use_asymptotic) = args
+    
+    n_cells, n_genes = adata.shape
+    
+    # Estimate based on data type and sparsity
+    if hasattr(adata.X, 'nnz'):  # Sparse matrix
+        nnz = adata.X.nnz
+        sparsity = nnz / (n_cells * n_genes)
+        # Sparse: data + indices + indptr
+        sparse_size_mb = (nnz * 8 + nnz * 4 + (n_cells + 1) * 8) / 1024 / 1024
+        # Dense equivalent for comparison
+        dense_size_mb = n_cells * n_genes * 8 / 1024 / 1024
+        
+        logger.debug(f"Data analysis: {n_cells}×{n_genes}, sparsity={sparsity:.3f}, "
+                    f"sparse={sparse_size_mb:.1f}MB, dense={dense_size_mb:.1f}MB")
+        
+        # Use dense size for scheduling decisions (since we convert to dense)
+        return dense_size_mb
+    else:
+        # Dense matrix
+        size_mb = n_cells * n_genes * 8 / 1024 / 1024  # Assuming float64
+        logger.debug(f"Data analysis: {n_cells}×{n_genes}, dense={size_mb:.1f}MB")
+        return size_mb
 
-    shared_handles = []
+
+def _execute_singlethread_computation(
+    X_dense: np.ndarray,
+    ref_data_sorted: np.ndarray,
+    group_rows: List[np.ndarray],
+    group_names: List[str],
+    n_genes: int,
+    chunk_size: int,
+    metric: str,
+    tie_correction: bool,
+    continuity_correction: bool,
+    use_asymptotic: Optional[bool],
+    max_bins: int,
+    gene_names: np.ndarray,
+    use_hist: bool
+) -> List[pd.DataFrame]:
+    """Execute single-threaded computation for all groups."""
+    all_results = []
+    
+    for group_idx, (group_name, group_indices) in enumerate(zip(group_names, group_rows)):
+        logger.info(f"📊 Processing {group_name}: {len(group_indices)} cells")
+        target_data_dense = X_dense[group_indices]  # (n_target_cells, n_genes)
+        
+        # Prepare output arrays
+        p_values = np.zeros(n_genes, dtype=np.float64)
+        u_stats = np.zeros(n_genes, dtype=np.float64)
+        
+        # Process in chunks for memory efficiency
+        for gene_start in tqdm(range(0, n_genes, chunk_size), 
+                             desc=f"Processing {group_name}"):
+            gene_end = min(n_genes, gene_start + chunk_size)
+            
+            # Prepare data for the kernel based on metric type
+            if metric == "wilcoxon" or not use_hist:
+                # Float kernel expects pre-sorted data, shape (n_genes, n_cells)
+                ref_chunk = ref_data_sorted[:, gene_start:gene_end].T  # (n_genes, n_ref_cells)
+                tar_chunk = np.sort(target_data_dense[:, gene_start:gene_end].T, axis=1)  # (n_genes, n_target_cells)
+                
+                chunk_p, chunk_u = rank_sum_chunk_kernel_float(
+                    ref_chunk, tar_chunk,
+                    tie_correction=tie_correction,
+                    continuity_correction=continuity_correction,
+                    use_asymptotic=use_asymptotic
+                )
+            
+            elif metric == "wilcoxon-hist" and use_hist:
+                # Hist kernel expects unsorted data, shape (n_genes, n_cells)
+                ref_chunk = ref_data_sorted[:, gene_start:gene_end].T  # (n_genes, n_ref_cells)
+                tar_chunk = target_data_dense[:, gene_start:gene_end].T  # (n_genes, n_target_cells)
+                
+                chunk_p, chunk_u = rank_sum_chunk_kernel_hist(
+                    ref_chunk, tar_chunk.astype(np.int64),
+                    tie_correction=tie_correction,
+                    continuity_correction=continuity_correction,
+                    use_asymptotic=use_asymptotic,
+                    max_bins=max_bins
+                )
+            
+            p_values[gene_start:gene_end] = chunk_p
+            u_stats[gene_start:gene_end] = chunk_u
+        
+        # Store results for this group
+        group_results = pd.DataFrame({
+            'target': group_name,
+            'feature': gene_names,
+            'p_value': p_values,
+            'u_statistic': u_stats
+        })
+        all_results.append(group_results)
+    
+    return all_results
+
+
+def _execute_multiprocess_computation(
+    X_dense: np.ndarray,
+    ref_data_sorted: np.ndarray,
+    group_rows: List[np.ndarray],
+    group_names: List[str],
+    n_genes: int,
+    chunk_size: int,
+    metric: str,
+    tie_correction: bool,
+    continuity_correction: bool,
+    use_asymptotic: Optional[bool],
+    max_bins: int,
+    gene_names: np.ndarray
+) -> List[pd.DataFrame]:
+    """Execute multiprocess computation for all groups."""
+    
+    # Create shared memory and tasks
+    shared_memories, (data_spec, ref_spec, result_spec) = _create_shared_memory(
+        X_dense, ref_data_sorted, group_rows, n_genes
+    )
+    
+    # Create tasks for parallel processing
+    tasks = _create_tasks(n_genes, group_rows, chunk_size)
+    logger.info(f"📋 Created {len(tasks)} tasks for parallel processing")
+    
     try:
-        # Connect to shared memory
-        Xc, shm_csc = _open_shared_csc(csc_spec)
-        shared_handles.extend(shm_csc)
+        # Determine number of processes
+        import multiprocessing as mp
+        num_processes = min(len(tasks), mp.cpu_count())
         
-        # Connect to pre-sorted reference group shared memory
-        ref_data_sorted, shm_ref_sorted = _open_shared_ref_sorted(ref_sorted_spec)
-        shared_handles.extend(shm_ref_sorted)
+        # Prepare worker arguments
+        worker_args = []
+        for task in tasks:
+            args = (data_spec, ref_spec, result_spec, task, metric,
+                   tie_correction, continuity_correction, use_asymptotic, max_bins)
+            worker_args.append(args)
         
-        pvec, uvec, shm_res = _open_shared_results(results_spec)
-        shared_handles.extend(shm_res)
+        # Execute tasks in parallel
+        with mp.Pool(processes=num_processes) as pool:
+            list(tqdm(
+                pool.imap_unordered(_chunk_worker, worker_args),
+                total=len(worker_args),
+                desc=f"Parallel processing"
+            ))
         
-        hist_pool = hist_temp_pool = None
-        if hist_pool_spec:
-            hist_pool, hist_temp_pool, shm_hist = _open_shared_hist_pool(hist_pool_spec)
-            shared_handles.extend(shm_hist)
-
-        g_idx, c0, c1 = task
-        cols = c1 - c0
-        base = g_idx * n_genes + c0
-
-        # Use pre-sorted reference group data - direct slicing, no need to re-extract and sort
-        ref_sorted_block = ref_data_sorted[c0:c1, :].T  # shape: (n_ref, cols) - transpose to match tar_block
+        # Extract results from shared memory
+        result_shm = shared_memories[2]
+        result_array = np.ndarray(result_spec['shape'], dtype=result_spec['dtype'], buffer=result_shm.buf)
         
-        # Extract only target group data block
-        tar_block = _dense_block_from_csc(Xc, target_rows_by_group[g_idx], c0, c1)  # shape: (n_tar, cols)
-
-        # Compute statistical test - note: ref_sorted_block is already sorted
-        p, U = _compute_statistical_test(
-            ref_sorted_block, tar_block, metric=metric, ref_already_sorted=True,
-            worker_id=worker_id, hist_pool=hist_pool, hist_temp_pool=hist_temp_pool,
-            tie_correction=tie_correction, continuity_correction=continuity_correction,
-            use_asymptotic=use_asymptotic, max_bins=max_bins
-        )
+        total_genes = len(group_rows) * n_genes
+        p_values_flat = result_array[:total_genes].reshape(len(group_rows), n_genes)
+        u_stats_flat = result_array[total_genes:].reshape(len(group_rows), n_genes)
         
-        pvec[base:base+cols] = p
-        uvec[base:base+cols] = U
+        # Build results DataFrame from parallel results
+        all_results = []
+        for group_idx, group_name in enumerate(group_names):
+            group_results = pd.DataFrame({
+                'target': group_name,
+                'feature': gene_names,
+                'p_value': p_values_flat[group_idx],
+                'u_statistic': u_stats_flat[group_idx]
+            })
+            all_results.append(group_results)
         
-    except Exception as e:
-        logging.warning(f"Worker {worker_id} failed on task {task}: {e}")
-        if 'pvec' in locals() and 'uvec' in locals():
-            try:
-                g_idx, c0, c1 = task
-                base = g_idx * n_genes + c0
-                pvec[base:base+(c1-c0)] = np.nan
-                uvec[base:base+(c1-c0)] = np.nan
-            except:
-                pass
+        return all_results
         
     finally:
-        for s in shared_handles:
-            try: s.close()
-            except: pass
-
-
-def _compute_statistical_test(ref_block: np.ndarray, tar_block: np.ndarray, metric: str = "wilcoxon", 
-                             ref_already_sorted: bool = False, worker_id: int = 0, 
-                             hist_pool: Optional[np.ndarray] = None, hist_temp_pool: Optional[np.ndarray] = None,
-                             tie_correction: bool = True, continuity_correction: bool = True, 
-                             use_asymptotic: Optional[bool] = None, max_bins: int = 200_000) -> Tuple[np.ndarray, np.ndarray]:
-    """Compute statistical test p-values and statistics.
-    
-    Args:
-        ref_block: Reference group data block [n_ref, n_cols]
-        tar_block: Target group data block [n_tar, n_cols]
-        metric: Statistical test method, currently supports "wilcoxon"
-        ref_already_sorted: Whether reference data is already sorted
-        worker_id: Worker ID (for shared pool access)
-        hist_pool: Shared histogram bin pool
-        hist_temp_pool: Shared temporary histogram bin pool
-        tie_correction: Whether to apply tie correction
-        continuity_correction: Whether to apply continuity correction
-        use_asymptotic: Whether to use asymptotic approximation
-        max_bins: Maximum number of bins
-        
-    Returns:
-        Tuple of (p_values, statistics) arrays
-        
-    Raises:
-        ValueError: If unsupported metric is used
-    """
-    if metric != "wilcoxon":
-        raise ValueError(f"Unsupported statistical test method: {metric}")
-    
-    # Determine whether to use histogram algorithm
-    use_hist = (hist_pool is not None and 
-                np.issubdtype(ref_block.dtype, np.integer))
-    
-    if use_hist:
-        vmin = int(min(ref_block.min(), tar_block.min()))
-        vmax = int(max(ref_block.max(), tar_block.max()))
-        
-        if vmax - vmin + 1 <= max_bins:
-            # For histogram algorithm, we need unsorted data to build histogram
-            if ref_already_sorted:
-                # If reference group is already sorted, need to pay attention to data layout
-                ref_data = ref_block.T.astype(np.int64)  # shape: (n_genes, n_ref) 
-            else:
-                ref_data = ref_block.T.astype(np.int64)
-                
-            return rank_sum_chunk_kernel_hist(
-                ref_data, tar_block.T.astype(np.int64),
-                tie_correction=tie_correction,
-                continuity_correction=continuity_correction,
-                use_asymptotic=use_asymptotic,
-                max_bins=vmax - vmin + 1
-            )
-    
-    # Use floating-point algorithm
-    if ref_already_sorted:
-        # Reference group is already sorted, data layout is (n_ref, cols)
-        # ref_block: (n_ref, cols), tar_block: (n_tar, cols)
-        # Need to transpose to shape suitable for rank_sum_chunk_kernel_float: (cols, n_samples)
-        ref_sorted = ref_block.T  # (cols, n_ref)
-        tar_sorted = np.sort(tar_block.T, axis=1)  # Transpose then sort: (cols, n_tar)
-    else:
-        # Both need sorting
-        ref_sorted = np.sort(ref_block.T, axis=1)  # (cols, n_ref)
-        tar_sorted = np.sort(tar_block.T, axis=1)  # (cols, n_tar)
-        
-    return rank_sum_chunk_kernel_float(
-        ref_sorted, tar_sorted,
-        tie_correction, continuity_correction, use_asymptotic
-    )
+        # Clean up shared memory
+        for shm in shared_memories:
+            try:
+                shm.close()
+                shm.unlink()
+            except:
+                pass
 
 
 # -- Public API
@@ -1150,17 +549,23 @@ def parallel_differential_expression(
     continuity_correction: bool = True,
     use_asymptotic: Optional[bool] = None,
     min_samples: int = 2,
-    max_bins: int = 100_000, # 1e5
+    max_bins: int = 100_000,
     prefer_hist_if_int: bool = False,
     num_workers: int = 1,
-    batch: int = 5000 * 200,
     clip_value: float = 20.0,
 ) -> pd.DataFrame:
     """High-performance parallel differential expression analysis.
     
-    Performs differential expression analysis using shared memory parallelization
-    for efficient analysis of large-scale single-cell data. Algorithmically aligned
-    with pdex library while providing superior computational performance.
+    Performs differential expression analysis using optimized shared memory parallelization
+    for efficient analysis of large-scale single-cell data. Features automatic chunk size
+    optimization and intelligent memory management based on data characteristics.
+    
+    Key Features:
+    - Automatic task scheduling optimized for your data and hardware
+    - Zero-copy data access using NumPy views for memory efficiency
+    - Pre-sorted reference data for maximum single-thread performance
+    - Optimized shared memory for excellent multi-thread scaling
+    - Histogram algorithm for integer data when beneficial
     
     Args:
         adata: AnnData object containing gene expression data
@@ -1168,39 +573,27 @@ def parallel_differential_expression(
         reference: Name of the reference group
         groups: List of target groups to compare. If None, uses all groups except reference
         metric: Statistical test method. Currently supports "wilcoxon" (Mann-Whitney U test)
-        tie_correction: Whether to apply tie correction
+        tie_correction: Whether to apply tie correction in statistical tests
         continuity_correction: Whether to apply continuity correction
-        use_asymptotic: Force asymptotic approximation. None for auto-selection
+        use_asymptotic: Force asymptotic approximation. None for automatic selection
         min_samples: Minimum number of samples per group. Groups with fewer samples are excluded
-        max_bins: Maximum number of bins for histogram algorithm
-        prefer_hist_if_int: Prefer histogram algorithm for integer data
-        num_workers: Number of parallel worker processes
-        batch_budget: Batch processing budget for task chunking
-        clip_value: Value to clip fold change to if it is infinite or NaN (default: 20.0). Set to None to disable clipping.
+        max_bins: Maximum number of bins for histogram algorithm (for integer data)
+        prefer_hist_if_int: Prefer histogram algorithm for integer data types
+        num_workers: Number of parallel worker processes (default: 1)
+        clip_value: Value to clip fold change if infinite or NaN. None to disable clipping
         
     Returns:
         DataFrame containing results with columns:
-            - 'pert': Perturbation group name
-            - 'gene': Gene name
-            - 'pval': P-value
+            - 'target': Treatment group name
+            - 'feature': Gene name  
+            - 'p_value': P-value from statistical test
             - 'fold_change': Fold change (target_mean / reference_mean)
             - 'log2_fold_change': Log2 fold change
-            - 'fdr': FDR-corrected p-value
+            - 'fdr': FDR-corrected p-value (Benjamini-Hochberg)
             
     Raises:
         ValueError: If reference group not found or no valid target groups
         TypeError: If unsupported data types are used
-        
-    Examples:
-        >>> import anndata as ad
-        >>> adata = ad.read_h5ad("data.h5ad")
-        >>> results_df = parallel_difference_expression(
-        ...     adata, 
-        ...     groupby_key="treatment",
-        ...     reference="control",
-        ...     num_workers=4
-        ... )
-        >>> print(f"Analyzed {results_df['pert'].nunique()} groups")
     """
     # Data preparation (optimized version)
     obs_vals = adata.obs[groupby_key].values
@@ -1234,104 +627,78 @@ def parallel_differential_expression(
     n_genes = adata.n_vars
     
     # Validate metric parameter
-    if metric != "wilcoxon":
-        raise ValueError(f"Unsupported statistical test method: {metric}")
+    if metric not in ["wilcoxon", "wilcoxon-hist"]:
+        raise ValueError(f"Unsupported statistical test method: {metric}. Available: ['wilcoxon', 'wilcoxon-hist']")
     
     # Determine whether to use histogram algorithm
     use_hist = (prefer_hist_if_int and np.issubdtype(adata.X.dtype, np.integer) and num_workers > 1)
 
-    # Pre-sort reference group data
-    logging.info("Preprocessing reference group data...")
+    # Pre-sort reference group data for optimal performance
+    logger.info("Creating pre-sorted reference data...")
     ref_data_sorted = _create_presorted_ref_data(adata, row_idx_ref)
 
-    # Create shared memory
-    shared_resources = []
-    try:
-        csc_spec, shm_csc = _create_shared_csc(adata.X)
-        shared_resources.extend(shm_csc)
+    # Automatic task scheduling based on data characteristics
+    logger.info("🤖 Optimizing task scheduling...")
+    data_size_mb = _estimate_data_size(adata)
+    logger.info(f"   Data: {adata.n_obs} cells × {n_genes} genes, {len(group_rows)} treatment groups")
+    logger.info(f"   Size: {data_size_mb:.1f} MB")
+    logger.info(f"   Workers: {num_workers}")
+    
+    # Convert to dense for efficient processing (modern approach)
+    logger.info("📊 Converting to dense matrix for optimal performance...")
+    if hasattr(adata.X, 'toarray'):
+        X_dense = adata.X.toarray()
+    else:
+        X_dense = adata.X
+    
+    # Pre-sort reference data for optimal performance
+    ref_data_sorted = np.sort(X_dense[row_idx_ref], axis=0)  # (n_ref_cells, n_genes)
+    
+    # Use auto-calculated chunk size
+    chunk_size = _auto_schedule_chunk_size(n_genes, len(group_rows), num_workers, data_size_mb)
+    logger.info(f"Auto-scheduling: {num_workers} workers, target {num_workers * 2} chunks/worker, chunk_size={chunk_size}")
+    
+    # Execute computation (single-thread or multi-process)
+    all_results = []
+    
+    if num_workers > 1:
+        logger.info(f"🚀 Using multiprocessing with {num_workers} workers")
+        all_results = _execute_multiprocess_computation(
+            X_dense, ref_data_sorted, group_rows, group_names, n_genes,
+            chunk_size, metric, tie_correction, continuity_correction, 
+            use_asymptotic, max_bins, adata.var.index.values
+        )
+    else:
+        logger.info("🔧 Using single-threaded processing")
+        all_results = _execute_singlethread_computation(
+            X_dense, ref_data_sorted, group_rows, group_names, n_genes,
+            chunk_size, metric, tie_correction, continuity_correction,
+            use_asymptotic, max_bins, adata.var.index.values, use_hist
+        )
 
-        # Create shared memory for pre-sorted reference group
-        ref_sorted_spec, shm_ref_sorted = _create_shared_ref_sorted(ref_data_sorted)
-        shared_resources.extend(shm_ref_sorted)
-
-        total_len = len(group_rows) * n_genes
-        res_spec, shm_res = _create_shared_results(total_len)
-        shared_resources.extend(shm_res)
-
-        hist_pool_spec = None
-        if use_hist:
-            hist_pool_spec, shm_hist = _create_shared_hist_pool(num_workers, max_bins)
-            shared_resources.extend(shm_hist)
-
-        # Task chunking
-        tasks = _make_chunks(n_genes, group_sizes, batch, use_hist)
-
-        # Parallel execution
-        if num_workers <= 1:
-            # Single process execution
-            iterator = tqdm(tasks, desc="Processing gene chunks")
-            for task in iterator:
-                args = (csc_spec, res_spec, hist_pool_spec, ref_sorted_spec, group_rows,
-                       n_genes, task, 0, metric, max_bins,
-                       tie_correction, continuity_correction, use_asymptotic)
-                _worker_run_chunk(args)
-        else:
-            # Multi-process execution
-            args_list = []
-            for i, task in enumerate(tasks):
-                worker_id = i % num_workers
-                args = (csc_spec, res_spec, hist_pool_spec, ref_sorted_spec, group_rows,
-                       n_genes, task, worker_id, metric, max_bins,
-                       tie_correction, continuity_correction, use_asymptotic)
-                args_list.append(args)
-            
-            with mp.Pool(processes=num_workers) as pool:
-                list(tqdm(pool.imap_unordered(_worker_run_chunk, args_list, chunksize=1), 
-                             total=len(tasks), desc="Parallel processing chunks"))
-
-        # Aggregate results
-        pvec, uvec, views_res = _open_shared_results(res_spec)
-        try:
-            P = pvec.reshape(len(group_rows), n_genes).copy()
-            U = uvec.reshape(len(group_rows), n_genes).copy()
-
-            n_failed = np.sum(np.isnan(P))
-            if n_failed > 0:
-                logging.warning(f"{n_failed} genes failed to compute")
-
-            # Calculate fold change
-            logging.info("Calculating fold change...")
-            fc_matrix = _compute_fold_change(adata, row_idx_ref, group_rows, clip_value)
-
-            # Calculate log2 fold change
-            logging.info("Calculating log2 fold change...")
-            log2_fc_matrix = _compute_log2_fold_change(fc_matrix)
-
-            # Calculate FDR
-            logging.info("Calculating FDR correction...")
-            fdr_matrix = _compute_fdr(P)
-
-            data = []
-            gene_names = adata.var_names.tolist()
-            
-            for i, pert_name in enumerate(group_names):
-                for j, gene_name in enumerate(gene_names):
-                    data.append({
-                        "target": pert_name,
-                        "feature": gene_name,
-                        "p_value": P[i, j],
-                        "fold_change": fc_matrix[i, j],
-                        "log2_fold_change": log2_fc_matrix[i, j],
-                        "fdr": fdr_matrix[i, j]
-                    })
-            
-            return pd.DataFrame(data)
-            
-        finally:
-            for s in views_res: 
-                try: s.close()
-                except: pass
-                
-    finally:
-        _close_shared_memory(shared_resources)
-
+    # Combine all results into a single DataFrame
+    logger.info("📊 Combining results...")
+    combined_results = pd.concat(all_results, ignore_index=True)
+    
+    # Calculate fold changes using unified function
+    logger.info("📈 Computing fold changes...")
+    ref_means = np.mean(X_dense[row_idx_ref], axis=0)  # (n_genes,)
+    
+    for idx, (group_name, group_indices) in enumerate(zip(group_names, group_rows)):
+        target_means = np.mean(X_dense[group_indices], axis=0)  # (n_genes,)
+        
+        # Get fold changes for this group using unified functions
+        fold_changes = _compute_fold_changes(target_means, ref_means, clip_value)
+        log2_fold_changes = _compute_log2_fold_change(fold_changes)
+        
+        # Update DataFrame for this group
+        group_mask = combined_results['target'] == group_name
+        combined_results.loc[group_mask, 'fold_change'] = fold_changes
+        combined_results.loc[group_mask, 'log2_fold_change'] = log2_fold_changes
+    
+    # Apply FDR correction
+    logger.info("📊 Applying FDR correction...")
+    combined_results['fdr'] = _compute_fdr(combined_results['p_value'].values)
+    
+    logger.info("✅ Analysis completed!")
+    return combined_results

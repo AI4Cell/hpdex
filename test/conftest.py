@@ -6,15 +6,16 @@ including command-line options for customizing test parameters.
 
 """
 
-import pytest
+import functools
+import signal
+import warnings
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+import anndata as ad
 import numpy as np
 import pandas as pd
-import anndata as ad
-from pathlib import Path
-from typing import List, Optional, Tuple, Dict, Any
-import warnings
-import signal
-import functools
+import pytest
 
 
 class TimeoutError(Exception):
@@ -53,8 +54,8 @@ def with_timeout(seconds):
 
 def run_with_timeout(func, timeout_seconds, *args, **kwargs):
     """Run a function with timeout protection."""
-    import threading
     import queue
+    import threading
     
     result_queue = queue.Queue()
     exception_queue = queue.Queue()
