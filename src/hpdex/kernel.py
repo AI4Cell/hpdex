@@ -3,8 +3,6 @@ from typing import Optional, Tuple
 
 import numpy as np
 from numba import get_num_threads, get_thread_id, njit, prange
-from numba.experimental import jitclass
-from numba.types import Tuple
 
 
 @njit(cache=True, fastmath=True, parallel=True, boundscheck=False)

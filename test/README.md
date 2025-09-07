@@ -1,301 +1,206 @@
-# hpdex Testing Guide
+# HPDEX Testing
 
-This document describes how to run comprehensive tests for the hpdex library using the new pytest-based testing framework.
-
-## Overview
-
-The testing framework provides three main test categories:
-
-1. **Kernel Tests** - Test algorithm correctness against scipy
-2. **Pipeline Tests** - Test full pipeline consistency against pdex  
-3. **Performance Tests** - Benchmark speed and efficiency
-4. **Real Data Tests** - Validate on actual h5ad datasets
+Configuration-based testing framework for hpdex.
 
 ## Quick Start
 
-### Install Test Dependencies
-
+### Basic Test
 ```bash
-# Install test dependencies
-pip install pytest pytest-cov pandas anndata scanpy
-
-# Optional: Install pdex for comparison tests
-pip install pdex
+python test.py config_quick.yml
 ```
 
-### Run All Tests
-
+### Full Test Suite  
 ```bash
-# Run all test categories
-python run_tests.py --all
+python test.py config.yml
+```
 
-# Or using pytest directly
-pytest benchmarks.py --test-all
+### Specific Categories
+```bash
+python test.py config.yml --category kernel_consistency
+python test.py config.yml --category pipeline_consistency
+```
+
+### List Available Tests
+```bash
+python test.py config.yml --list-categories
 ```
 
 ## Test Categories
 
-### 1. Kernel Consistency Tests
+### `kernel_consistency`
+- Tests statistical kernel accuracy against scipy.stats.mannwhitneyu
+- Validates both float and histogram algorithms  
+- Success: p-value errors < 1e-10
 
-Test hpdex kernel functions against scipy for correctness:
+### `pipeline_consistency`  
+- Tests full pipeline against pdex library
+- Validates p-values, fold changes, FDR correction
+- Success: correlation > 0.95
 
-```bash
-# Test floating-point kernel
-python run_tests.py --kernels
+### `performance_kernels`
+- Benchmarks kernel performance vs scipy
+- Tests different data scales and memory usage
+- Success: comparable or better performance
 
-# Test with custom tolerance
-python run_tests.py --kernels --tolerance 1e-5
+### `performance_pipeline`
+- Benchmarks full pipeline vs pdex  
+- Tests multiprocessing scalability
+- Success: significant speedup with consistent results
 
-# Using pytest markers
-pytest benchmarks.py -m kernel
+### `edge_cases`
+- Tests robustness with edge cases
+- Small groups, constant genes, sparse data
+- Success: proper error handling and valid results
+
+## Configuration Files
+
+### `config_quick.yml` - Quick Tests
+Small-scale tests for development and CI:
+```yaml
+test_categories:
+  kernel_consistency: true
+  pipeline_consistency: true
+  edge_cases: true
+  
+kernel_tests:
+  tolerance: 0.000001
+  n_runs: 3
+  
+pipeline_tests:
+  test_datasets:
+    - name: "small"
+      n_cells: 1000
+      n_genes: 500
+      n_groups: 3
 ```
 
-**What it tests:**
-- `rank_sum_chunk_kernel_float` vs `scipy.stats.mannwhitneyu`
-- `rank_sum_chunk_kernel_hist` vs scipy for integer data
-- Consistency with tie correction and continuity correction
-- Edge cases and boundary conditions
-
-### 2. Pipeline Consistency Tests
-
-Test full hpdex pipeline against pdex:
-
-```bash
-# Test pipeline consistency
-python run_tests.py --pipeline
-
-# Test with custom correlation threshold
-python run_tests.py --pipeline --correlation-threshold 0.9
-
-# Using pytest markers
-pytest benchmarks.py -m pipeline
+### `config.yml` - Full Test Suite  
+Comprehensive testing with performance benchmarks:
+```yaml
+test_categories:
+  kernel_consistency: true
+  pipeline_consistency: true 
+  performance_kernels: true
+  performance_pipeline: true
+  edge_cases: true
+  
+performance_tests:
+  kernel_benchmarks:
+    benchmark_runs: 5
+    timeout_seconds: 300
+    
+  pipeline_benchmarks:
+    - name: "large"
+      n_cells: 10000
+      n_genes: 5000
+      n_groups: 10
 ```
 
-**What it tests:**
-- `parallel_differential_expression` vs `pdex.parallel_differential_expression`
-- P-value correlations between methods
-- Fold change consistency
-- FDR < 0.05 differential gene set overlap (Jaccard similarity)
+### Custom Configuration
+Modify any section to customize tests:
+```yaml
+# Adjust test scale
+pipeline_tests:
+  test_datasets:
+    - name: "custom"
+      n_cells: 5000      # Custom cell count
+      n_genes: 2000      # Custom gene count  
+      n_groups: 4        # Custom group count
 
-### 3. Performance Benchmarks
-
-Test speed and efficiency:
-
-```bash
-# Run performance benchmarks
-python run_tests.py --performance
-
-# Test specific sizes
-python run_tests.py --performance --benchmark-sizes "small,medium"
-
-# Skip slow tests
-python run_tests.py --performance --skip-slow
-
-# Multi-threaded performance
-python run_tests.py --performance --n-workers 8
+# Adjust tolerances
+kernel_tests:
+  tolerance: 1e-8      # Relaxed tolerance
+  n_runs: 10           # More test runs
 ```
 
-**What it tests:**
-- Kernel-level performance (hpdex vs scipy)
-- Pipeline-level performance (hpdex vs pdex)
-- Large-scale performance tests
-- Memory efficiency and throughput
+## Test Results
 
-### 4. Real Data Tests
-
-Test on actual h5ad datasets:
-
-```bash
-# Test on available datasets
-python run_tests.py --real-data
-
-# Test specific datasets
-python run_tests.py --real-data --h5ad-files "PBMC_10K.h5ad,HumanPBMC.h5ad"
-
-# Limit dataset size for faster testing
-python run_tests.py --real-data --max-cells 5000 --max-genes 1000
+Results are saved to `test_results/` with timestamp:
+```
+test_results/
+└── test_run_20240107_143022/
+    ├── test_summary.json      # Test summary
+    ├── detailed_results.json  # Detailed results
+    └── test_report.md         # Human-readable report
 ```
 
-**What it tests:**
-- Real h5ad file loading and processing
-- Automatic group detection
-- Consistency with real biological data
-- Performance on real datasets
+### Example Results
 
-## Configuration Options
-
-### Test Parameters
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `--test-data-dir` | `../Datasets` | Directory containing test datasets |
-| `--n-workers` | `4` | Number of parallel workers |
-| `--max-cells` | `10000` | Maximum cells for large datasets |
-| `--max-genes` | `2000` | Maximum genes for large datasets |
-| `--tolerance` | `1e-4` | Numerical comparison tolerance |
-| `--correlation-threshold` | `0.8` | Minimum correlation for consistency |
-| `--fdr-threshold` | `0.05` | FDR threshold for DEG analysis |
-
-### Performance Configuration
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `--skip-slow` | `False` | Skip time-consuming tests |
-| `--benchmark-sizes` | `small,medium,large` | Which benchmark sizes to run |
-
-## Advanced Usage
-
-### Custom Test Selection
-
-```bash
-# Run tests by marker
-pytest benchmarks.py -m "kernel and not slow"
-
-# Run tests by keyword
-pytest benchmarks.py -k "consistency"
-
-# Run specific test class
-pytest benchmarks.py::TestKernelConsistency
-
-# Run specific test method
-pytest benchmarks.py::TestKernelConsistency::test_float_kernel_vs_scipy
+**Kernel Consistency:**
+```json
+{
+  "max_p_error": 1.23e-15,
+  "correlation_p": 0.999999,
+  "p_values_match": true
+}
 ```
 
-### Coverage Reports
-
-```bash
-# Enable coverage
-python run_tests.py --all --cov
-
-# Generate HTML coverage report
-pytest benchmarks.py --test-all --cov=hpdex --cov-report=html
+**Performance:**
+```json
+{
+  "hpdex": {"mean_time": 2.1}, 
+  "scipy": {"mean_time": 15.3},
+  "speedup": 7.3
+}
 ```
 
-### Parallel Testing
+## Common Issues
 
-```bash
-# Install pytest-xdist
-pip install pytest-xdist
-
-# Run tests in parallel
-python run_tests.py --all --parallel
+**Missing pdex:**
 ```
-
-### Profiling
-
-```bash
-# Install pytest-profiling
-pip install pytest-profiling
-
-# Profile test execution
-python run_tests.py --performance --profile
+Warning: pdex not available, pipeline tests will be skipped
 ```
+Install pdex or skip pipeline tests.
 
-## Example Test Runs
+**Memory issues:**
+- Reduce data sizes in config
+- Lower `num_workers`
+- Increase `memory_limit_gb`
 
-### Quick Development Test
-```bash
-# Fast test for development
-python run_tests.py --kernels --max-cells 1000 --max-genes 100 --skip-slow
+**Timeouts:**
+- Increase `timeout_seconds`
+- Reduce test scale
+- Check system load
+
+## Configuration Reference
+
+### Key Configuration Options
+
+```yaml
+# Global settings
+environment:
+  num_workers: 4
+  memory_limit_gb: 8.0
+  random_seed: 42
+
+# Test categories to run
+test_categories:
+  kernel_consistency: true
+  pipeline_consistency: true
+  performance_kernels: false
+  performance_pipeline: false
+  edge_cases: true
+
+# Kernel test settings
+kernel_tests:
+  tolerance: 1e-10
+  n_runs: 5
+  max_cells: 10000
+  max_genes: 5000
+
+# Pipeline test datasets
+pipeline_tests:
+  correlation_threshold: 0.95
+  test_datasets:
+    - name: "small"
+      n_cells: 1000
+      n_genes: 500
+      n_groups: 3
+      effect_size: 1.5
+      
+# Performance test settings  
+performance_tests:
+  kernel_benchmarks:
+    benchmark_runs: 5
+    timeout_seconds: 300
 ```
-
-### Comprehensive Validation
-```bash
-# Full validation before release
-python run_tests.py --all --n-workers 8 --cov
-```
-
-### Performance Evaluation
-```bash
-# Detailed performance analysis
-python run_tests.py --performance --benchmark-sizes "small,medium,large,huge" --n-workers 8
-```
-
-### Real Data Validation
-```bash
-# Test on specific real datasets
-python run_tests.py --real-data --h5ad-files "PBMC_10K.h5ad,norman.h5ad" --max-cells 20000
-```
-
-## Interpreting Results
-
-### Kernel Tests
-- **P-value correlation > 0.9**: Excellent agreement with scipy
-- **Max difference < 1e-4**: Numerical precision within tolerance
-- **Failed tests**: Potential algorithm bugs
-
-### Pipeline Tests  
-- **P-value correlation > 0.8**: Good consistency with pdex
-- **Fold change correlation > 0.8**: Consistent differential expression
-- **Jaccard similarity > 0.3**: Reasonable DEG overlap
-
-### Performance Tests
-- **Speedup > 1.0x**: hpdex is faster
-- **Speedup > 10x**: Significant performance improvement
-- **Throughput**: Million data points processed per second
-
-### Real Data Tests
-- **No errors**: Data loading and processing works
-- **Significant DEGs found**: Method detects biological signal
-- **Consistent results**: Reproducible analysis
-
-## Troubleshooting
-
-### Common Issues
-
-1. **Import Errors**
-   ```bash
-   # Install missing dependencies
-   pip install scipy pandas anndata pytest
-   ```
-
-2. **Memory Issues**
-   ```bash
-   # Reduce dataset size
-   python run_tests.py --all --max-cells 5000 --max-genes 1000
-   ```
-
-3. **Slow Tests**
-   ```bash
-   # Skip slow tests
-   python run_tests.py --all --skip-slow
-   ```
-
-4. **Dataset Not Found**
-   ```bash
-   # Check data directory
-   python run_tests.py --real-data --test-data-dir /path/to/datasets
-   ```
-
-### Debug Mode
-
-```bash
-# Verbose output with full tracebacks
-pytest benchmarks.py --test-all -v --tb=long -s
-```
-
-## Contributing
-
-When adding new tests:
-
-1. Use appropriate pytest markers (`@pytest.mark.kernel`, etc.)
-2. Follow the existing test naming convention
-3. Add proper documentation and assertions
-4. Test both success and failure cases
-5. Update this guide if adding new test categories
-
-## Test Data Requirements
-
-The real data tests expect h5ad files in the following structure:
-```
-../Datasets/CellFM/
-├── PBMC_10K.h5ad
-├── HumanPBMC.h5ad  
-├── norman.h5ad
-└── ...
-```
-
-Each h5ad file should have:
-- `adata.X`: Expression matrix
-- `adata.obs`: Cell metadata with grouping columns
-- `adata.var`: Gene metadata

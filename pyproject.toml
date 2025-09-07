@@ -1,6 +1,6 @@
 [project]
 name = "hpdex"
-version = "0.1.7"
+version = "0.2.0"
 description = "High-Performance Parallel Differential Expression Analysis for Single-Cell Data"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -24,10 +24,7 @@ packages = ["src/hpdex"]
 test = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
-    "numpy>=1.23.5",
-    "scipy>=1.11.0",
-    "pandas>=1.5.0",
-    "anndata>=0.8.0",
     "scanpy>=1.9.0",
+    "psutil>=7.0.0",
     "pdex>=0.1.24"
 ]

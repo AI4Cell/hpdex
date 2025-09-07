@@ -501,6 +501,9 @@ def parallel_differential_expression(
     # Prepare results storage
     all_results = []
     
+    # Pre-calculate reference means for fold change calculation (avoid recalculation)
+    ref_means = np.mean(ref_data_sorted, axis=0)
+    
     # target_indices_dict already loaded above to avoid duplicate file reads
     
     # Step 3: Process batches
@@ -522,8 +525,10 @@ def parallel_differential_expression(
                 )
                 load_pbar.update(len(batch_groups))
             
-            # Process each group in the batch
-            for group in batch_groups:
+            # Process batch efficiently - combine all groups in the batch for better performance
+            if len(batch_groups) == 1:
+                # Single group - use existing logic
+                group = batch_groups[0]
                 target_data_dense = batch_data_dict[group]
                 
                 logger.info(f"   📊 Computing differential expression for {group}: {target_data_dense.shape}")
@@ -548,14 +553,14 @@ def parallel_differential_expression(
                 if num_workers > 1:
                     logger.debug(f"     Using multiprocessing with {num_workers} workers for {group}")
                     group_results_list = _execute_multiprocess_computation(
-                        target_data_dense, ref_data_sorted.T, group_indices, group_names_list, n_vars,
+                        target_data_dense, ref_data_sorted, group_indices, group_names_list, n_vars,
                         chunk_size, metric, tie_correction, continuity_correction, 
                         use_asymptotic, max_bins, gene_names
                     )
                 else:
                     logger.debug(f"     Using single-threaded processing for {group}")
                     group_results_list = _execute_singlethread_computation(
-                        target_data_dense, ref_data_sorted.T, group_indices, group_names_list, n_vars,
+                        target_data_dense, ref_data_sorted, group_indices, group_names_list, n_vars,
                         chunk_size, metric, tie_correction, continuity_correction,
                         use_asymptotic, max_bins, gene_names, use_hist
                     )
@@ -564,7 +569,6 @@ def parallel_differential_expression(
                 group_results = group_results_list[0]  # Should only be one result
                 
                 # Calculate fold changes efficiently
-                ref_means = np.mean(ref_data_sorted, axis=0)
                 target_means = np.mean(target_data_dense, axis=0)
                 
                 # Calculate fold changes using unified function
@@ -578,7 +582,80 @@ def parallel_differential_expression(
                 all_results.append(group_results)
                 
                 logger.info(f"   ✅ Group {group} completed")
-                pbar.update(1)  # Update progress bar for each completed group
+                pbar.update(1)
+            
+            else:
+                # Multiple groups - batch process for better efficiency
+                logger.info(f"   📊 Batch processing {len(batch_groups)} groups together")
+                
+                # Combine all target data for the batch
+                batch_target_data = []
+                batch_group_indices = []
+                batch_group_names = []
+                current_start = 0
+                
+                for group in batch_groups:
+                    target_data = batch_data_dict[group]
+                    batch_target_data.append(target_data)
+                    
+                    # Create group indices for this group in the combined matrix
+                    group_size = len(target_data)
+                    group_indices_range = np.arange(current_start, current_start + group_size)
+                    batch_group_indices.append(group_indices_range)
+                    batch_group_names.append(group)
+                    current_start += group_size
+                
+                # Combine all target data into one matrix
+                combined_target_data = np.vstack(batch_target_data)
+                
+                # Use auto-calculated chunk size based on combined data size
+                data_size_mb = (ref_data_sorted.nbytes + combined_target_data.nbytes) / (1024 * 1024)
+                chunk_size = _auto_schedule_chunk_size(
+                    n_vars, len(batch_groups), num_workers, data_size_mb
+                )
+                logger.debug(f"Batch processing: chunk_size={chunk_size} for {data_size_mb:.1f}MB combined data")
+                
+                # Determine algorithm
+                use_hist = (metric == "wilcoxon-hist") or (
+                    prefer_hist_if_int and metric == "wilcoxon" and
+                    np.issubdtype(combined_target_data.dtype, np.integer)
+                )
+                
+                # Execute computation for all groups in the batch
+                if num_workers > 1:
+                    logger.debug(f"     Using multiprocessing with {num_workers} workers for batch")
+                    batch_results_list = _execute_multiprocess_computation(
+                        combined_target_data, ref_data_sorted, batch_group_indices, batch_group_names, n_vars,
+                        chunk_size, metric, tie_correction, continuity_correction, 
+                        use_asymptotic, max_bins, gene_names
+                    )
+                else:
+                    logger.debug(f"     Using single-threaded processing for batch")
+                    batch_results_list = _execute_singlethread_computation(
+                        combined_target_data, ref_data_sorted, batch_group_indices, batch_group_names, n_vars,
+                        chunk_size, metric, tie_correction, continuity_correction,
+                        use_asymptotic, max_bins, gene_names, use_hist
+                    )
+                
+                # Process results and add fold changes for each group
+                
+                for i, group_results in enumerate(batch_results_list):
+                    group = batch_group_names[i]
+                    target_data_for_group = batch_target_data[i]
+                    
+                    # Calculate fold changes for this group
+                    target_means = np.mean(target_data_for_group, axis=0)
+                    fold_changes = _compute_fold_changes(target_means, ref_means, clip_value)
+                    log2_fold_changes = _compute_log2_fold_change(fold_changes)
+                    
+                    # Add fold change columns
+                    group_results['fold_change'] = fold_changes
+                    group_results['log2_fold_change'] = log2_fold_changes
+                    
+                    all_results.append(group_results)
+                    
+                    logger.info(f"   ✅ Group {group} completed")
+                    pbar.update(1)
             
             # Clean up batch data to free memory
             del batch_data_dict

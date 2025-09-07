@@ -30,7 +30,7 @@ from .kernel import rank_sum_chunk_kernel_float, rank_sum_chunk_kernel_hist
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-SUPPORTED_METRICS = ["wilcoxon", "wilcoxon-hist"]
+SUPPORTED_METRICS = ["wilcoxon"]
 
 
 # -- Worker Functions for Multiprocessing --
@@ -196,16 +196,15 @@ def _compute_fold_changes(target_means: np.ndarray, ref_means: np.ndarray,
     """
     Safely compute fold changes with proper handling of edge cases.
     
-    This is the optimized version that handles all edge cases properly:
-    - Reference mean ≈ 0 and target mean ≈ 0: set to clip_value
-    - Reference mean ≈ 0 and target mean > 0: set to +inf  
-    - Target mean ≈ 0 and reference mean > 0: set to 0.0
+    This implementation follows pdex logic:
+    - Reference mean ≈ 0: set to clip_value (infinite fold change, clipped)
+    - Target mean ≈ 0: set to 1/clip_value (zero fold change, clipped)  
     - Normal case: target_mean / ref_mean
     
     Args:
         target_means: Mean expression in target group(s), shape (..., n_genes)
         ref_means: Mean expression in reference group, shape (n_genes,) or (..., n_genes)
-        clip_value: Value to use when both means are close to zero
+        clip_value: Value to use for clipping infinite/zero fold changes
         
     Returns:
         Fold changes array with same shape as target_means
@@ -226,13 +225,12 @@ def _compute_fold_changes(target_means: np.ndarray, ref_means: np.ndarray,
     with np.errstate(divide="ignore", invalid="ignore"):
         fc = target_means / ref_means
         
-        # Handle special cases:
-        # 1. If ref_mean ≈ 0 and target_mean ≈ 0: set to clip_value (for consistency)
-        # 2. If ref_mean ≈ 0 and target_mean > 0: set to np.inf
-        # 3. If target_mean ≈ 0 and ref_mean > 0: set to 0.0
-        fc = np.where(ref_zero_mask & target_zero_mask, clip_value, fc)
-        fc = np.where(ref_zero_mask & ~target_zero_mask, np.inf, fc)
-        fc = np.where(target_zero_mask & ~ref_zero_mask, 0.0, fc)
+        # Handle special cases following pdex logic:
+        # Note: Order matters! ref_mean = 0 takes precedence over target_mean = 0
+        # 1. If target_mean ≈ 0: set to 1/clip_value (zero fold change -> clipped)
+        # 2. If ref_mean ≈ 0: set to clip_value (infinite fold change -> clipped)
+        fc = np.where(target_zero_mask, 1.0/clip_value, fc)
+        fc = np.where(ref_zero_mask, clip_value, fc)
     
     return fc
 
@@ -411,30 +409,31 @@ def _execute_singlethread_computation(
             gene_end = min(n_genes, gene_start + chunk_size)
             
             # Prepare data for the kernel based on metric type
-            if metric == "wilcoxon" or not use_hist:
+            if metric == "wilcoxon":
                 # Float kernel expects pre-sorted data, shape (n_genes, n_cells)
                 ref_chunk = ref_data_sorted[:, gene_start:gene_end].T  # (n_genes, n_ref_cells)
-                tar_chunk = np.sort(target_data_dense[:, gene_start:gene_end].T, axis=1)  # (n_genes, n_target_cells)
+                if use_hist:
+                    tar_chunk = target_data_dense[:, gene_start:gene_end].T  # (n_genes, n_target_cells)
                 
-                chunk_p, chunk_u = rank_sum_chunk_kernel_float(
-                    ref_chunk, tar_chunk,
-                    tie_correction=tie_correction,
-                    continuity_correction=continuity_correction,
-                    use_asymptotic=use_asymptotic
-                )
-            
-            elif metric == "wilcoxon-hist" and use_hist:
-                # Hist kernel expects unsorted data, shape (n_genes, n_cells)
-                ref_chunk = ref_data_sorted[:, gene_start:gene_end].T  # (n_genes, n_ref_cells)
-                tar_chunk = target_data_dense[:, gene_start:gene_end].T  # (n_genes, n_target_cells)
-                
-                chunk_p, chunk_u = rank_sum_chunk_kernel_hist(
-                    ref_chunk, tar_chunk.astype(np.int64),
-                    tie_correction=tie_correction,
-                    continuity_correction=continuity_correction,
-                    use_asymptotic=use_asymptotic,
-                    max_bins=max_bins
-                )
+                    chunk_p, chunk_u = rank_sum_chunk_kernel_hist(
+                        ref_chunk, tar_chunk.astype(np.int64),
+                        tie_correction=tie_correction,
+                        continuity_correction=continuity_correction,
+                        use_asymptotic=use_asymptotic,
+                        max_bins=max_bins
+                    )
+                else:
+                    tar_chunk = np.sort(target_data_dense[:, gene_start:gene_end].T, axis=1)  # (n_genes, n_target_cells)
+                    
+                    chunk_p, chunk_u = rank_sum_chunk_kernel_float(
+                        ref_chunk, tar_chunk,
+                        tie_correction=tie_correction,
+                        continuity_correction=continuity_correction,
+                        use_asymptotic=use_asymptotic
+                    )
+            else:
+                # TODO
+                raise ValueError(f"Unsupported metric: {metric}; supported metrics: {SUPPORTED_METRICS}")
             
             p_values[gene_start:gene_end] = chunk_p
             u_stats[gene_start:gene_end] = chunk_u

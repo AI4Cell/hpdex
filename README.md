@@ -1,38 +1,70 @@
 <div align="center">
 
-# 🧬 hpdex: High-Performance Differential Expression Analysis
+<!-- Optional logo -->
 
-**Ultra-fast parallel differential expression analysis for single-cell perturbation sequencing**
+<!-- <img src=".github/assets/hpdex-logo.svg" width="96" alt="hpdex logo" /> -->
 
-[![Python Version](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-passing-green.svg)](#testing)
-[![Performance](https://img.shields.io/badge/performance-10x%20faster-red.svg)](#performance)
+<h1>hpdex</h1>
 
-[**Installation**](#installation) •
-[**Quick Start**](#quick-start) •
-[**Documentation**](#api-reference) •
-[**Performance**](#performance) •
-[**Testing**](#testing)
+<p><em>High‑performance differential expression analysis for single‑cell data</em></p>
+
+<p>
+  <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.10%2B-blue.svg" alt="Python 3.10+" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT License" /></a>
+  <img src="https://img.shields.io/badge/status-experimental-purple" alt="Status: experimental" />
+</p>
+
+<p>
+  <a href="#-overview">Overview</a> ·
+  <a href="#-installation">Installation</a> ·
+  <a href="#-quick-start">Quick Start</a> ·
+  <a href="#-api-reference">API</a> ·
+  <a href="#-statistical-kernels">Kernels</a> ·
+  <a href="#-testing">Testing</a> ·
+  <a href="#-faq">FAQ</a> ·
+  <a href="#-license">License</a>
+</p>
 
 </div>
 
 ---
 
-## 🌟 Overview
+## 🔎 Overview
 
-**hpdex** is a revolutionary high-performance parallel differential expression analysis library designed for single-cell perturbation sequencing data. It delivers **10x+ speed improvements** over traditional methods while maintaining algorithmic consistency with established statistical frameworks.
+**hpdex** provides efficient differential expression (DE) analysis for single‑cell data using **multiprocessing** and an optimized **Mann–Whitney U** implementation. It aims to be *statistically consistent* with `scipy.stats.mannwhitneyu` while scaling to large datasets.
 
+<table>
+  <tr>
+    <td>⚡️ <strong>Fast</strong><br/><small>Batch processing & shared memory minimize copies.</small></td>
+    <td>🧠 <strong>Accurate</strong><br/><small>Tie‑aware U statistics; normal approximation for large <i>n</i>.</small></td>
+    <td>🧰 <strong>Versatile</strong><br/><small>Float & histogram kernels auto‑selected by data type.</small></td>
+  </tr>
+  <tr>
+    <td>🧵 <strong>Parallel</strong><br/><small>Simple <code>num_workers</code> control.</small></td>
+    <td>💾 <strong>Memory‑savvy</strong><br/><small>Reuses pre‑sorted references across comparisons.</small></td>
+    <td>📊 <strong>Streaming</strong><br/><small>Handles datasets larger than RAM via chunking.</small></td>
+  </tr>
+</table>
 
-## 🚀 Installation
+---
 
-### Quick Install (Recommended)
+## ⚙️ Installation
+
+### Quick Install (coming soon)
 
 ```bash
 pip install hpdex
 ```
 
-### Development Install
+### uv (recommended)
+
+```bash
+git clone https://github.com/AI4Cell/hpdex.git
+cd hpdex
+uv sync
+```
+
+### pip (from source)
 
 ```bash
 git clone https://github.com/AI4Cell/hpdex.git
@@ -40,36 +72,47 @@ cd hpdex
 pip install -e .
 ```
 
-### Requirements
+<details>
+<summary><strong>Requirements</strong></summary>
 
-- **Python** ≥ 3.10
-- **Core dependencies**: numpy, scipy, numba, pandas, anndata
-- **Optional**: pdex (for comparison), scanpy (for examples)
+* Python ≥ 3.10
+* <code>numpy</code>, <code>scipy</code>, <code>numba</code>, <code>pandas</code>, <code>anndata</code>
+
+</details>
 
 ---
 
-## ⚡ Quick Start
-
-### Basic Usage
+## 🚀 Quick Start
 
 ```python
 import anndata as ad
 from hpdex import parallel_differential_expression
 
-adata = ad.read_h5ad("your_data.h5ad")
+# Load your data
+adata = ad.read_h5ad("data.h5ad")
 
+# Run differential expression analysis
 results = parallel_differential_expression(
     adata,
     groupby_key="perturbation",
     reference="control",
-    num_workers=8
+    num_workers=4,
 )
 
-print(f"🧬 Analyzed {results.shape[0]:,} gene-perturbation pairs")
-print(f"📊 Found {(results['fdr'] < 0.05).sum():,} significant hits")
-
-results.to_csv("differential_genes.csv", index=False)
+# Save results
+results.to_csv("de_results.csv", index=False)
 ```
+
+**Output schema** (DataFrame columns):
+
+| column             | description                              |
+| ------------------ | ---------------------------------------- |
+| `target`           | target group name                        |
+| `feature`          | gene / feature id                        |
+| `p_value`          | (two‑sided) p‑value from Mann–Whitney U  |
+| `fold_change`      | mean(target) / mean(reference)           |
+| `log2_fold_change` | `log2(fold_change)`                      |
+| `fdr`              | BH‑adjusted p‑value (Benjamini–Hochberg) |
 
 ---
 
@@ -77,11 +120,11 @@ results.to_csv("differential_genes.csv", index=False)
 
 ### `parallel_differential_expression`
 
-The main function for differential expression analysis.
+Main entry for DE analysis.
 
 ```python
 parallel_differential_expression(
-    adata: AnnData,
+    adata: ad.AnnData,
     groupby_key: str,
     reference: str,
     groups: Optional[List[str]] = None,
@@ -93,154 +136,106 @@ parallel_differential_expression(
     max_bins: int = 100_000,
     prefer_hist_if_int: bool = False,
     num_workers: int = 1,
-    batch: int = 1_000_000
+    clip_value: float = 20.0,
 ) -> pd.DataFrame
 ```
 
-#### Parameters
+**Parameters**
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `adata` | `AnnData` | - | Single-cell data object |
-| `groupby_key` | `str` | - | Column in `adata.obs` for grouping |
-| `reference` | `str` | - | Reference group name |
-| `groups` | `List[str]` | `None` | Target groups (auto-detect if None) |
-| `metric` | `str` | `"wilcoxon"` | Statistical test (Mann-Whitney U) |
-| `tie_correction` | `bool` | `True` | Apply tie correction |
-| `continuity_correction` | `bool` | `True` | Apply continuity correction |
-| `use_asymptotic` | `bool` | `None` | Force asymptotic (auto if None) |
-| `min_samples` | `int` | `2` | Minimum cells per group |
-| `max_bins` | `int` | `100000` | Max bins for histogram algorithm |
-| `prefer_hist_if_int` | `bool` | `False` | Prefer histogram for integer data |
-| `num_workers` | `int` | `1` | Number of parallel processes |
-| `batch` | `int` | `1000000` | Batch size for memory management |
-| `clip_value` | `float` | `20.0` | Value to clip fold change to if it is infinite or NaN |
+* `adata` — `AnnData` object containing expression matrix & metadata
+* `groupby_key` — column in `adata.obs` for grouping
+* `reference` — reference group name (e.g., "control")
+* `groups` — optional subset of target groups (auto if `None`)
+* `metric` — currently `"wilcoxon"` (Mann–Whitney U)
+* `tie_correction` — whether to apply tie correction
+* `continuity_correction` — whether to apply continuity correction
+* `use_asymptotic` — whether to use asymptotic approximation
+* `min_samples` — minimum number of samples per group
+* `max_bins` — maximum number of bins for histogram algorithm
+* `prefer_hist_if_int` — prefer histogram algorithm for integer data
+* `num_workers` — number of worker processes
+* `clip_value` — clip fold change if infinite or NaN
 
-#### Returns
+> 💡 **Tips**
+>
+> * For UMI counts, set `prefer_hist_if_int=True` to favor the histogram kernel.
+> * Very large samples may produce extremely small `p_value`s due to underflow; rely on `fdr` for decisions.
 
-| Column | Type | Description |
-|--------|------|-------------|
-| `target` | `str` | Target group name |
-| `feature` | `str` | Gene name |
-| `p_value` | `float` | Raw p-value from Mann-Whitney U test |
-| `fold_change` | `float` | Fold change (target/reference mean) |
-| `log2_fold_change` | `float` | Log2 fold change |
-| `fdr` | `float` | FDR-corrected p-value (Benjamini-Hochberg) |
+**Returns** — `pd.DataFrame` (see *Output schema* above)
 
 ---
 
-## 🧪 Testing
+## 🧪 Statistical Kernels
 
-hpdex includes a comprehensive test suite ensuring correctness and performance.
+hpdex implements two complementary kernels and auto‑selects by data type.
 
-### Quick Test
+### Float Kernel
 
-```bash
-cd hpdex/test
-python run_tests.py --all
-```
+* **Use**: continuous expression (e.g., log‑counts)
+* **Alg**: merge‑rank computation for U; Numba JIT; vectorized batches
+* **Mem**: `O(n)` working memory for sorted arrays
 
-### Test Categories
+### Histogram Kernel
 
-#### 1. Correctness Tests
-```bash
-# Test against scipy (gold standard)
-python run_tests.py --kernels
+* **Use**: integer/discrete counts (e.g., UMI)
+* **Alg**: bucketized rank computation; reduces sorting overhead
+* **Mem**: `O(bins)` working memory, typically ≪ data size
 
-# Test against pdex (pipeline consistency)
-python run_tests.py --pipeline
-```
+**Common features**
 
-#### 2. Performance Tests
-```bash
-# Benchmark performance
-python run_tests.py --performance
+* Proper **tie handling** and variance correction
+* **Asymptotic normal** approximation for large samples
+* **Batching** across gene × group pairs
+* **Reference re‑use** to save sorting cost
 
-# Large-scale tests (may take time)
-python run_tests.py --performance --benchmark-sizes "large,huge"
-```
-
-#### 3. Real Data Tests
-```bash
-# Test on real datasets
-python run_tests.py --real-data --h5ad-files "PBMC_10K.h5ad,norman.h5ad"
-```
-
-### Custom Test Configuration
-
-```bash
-# Configure test parameters
-python run_tests.py --all \
-    --n-workers 8 \
-    --max-cells 20000 \
-    --tolerance 1e-5 \
-    --correlation-threshold 0.95
-```
-
-### Validation Results
-
-Our test suite validates:
-- ✅ **Statistical Accuracy**: P-values within 1e-4 tolerance of scipy
-- ✅ **Pipeline Consistency**: >99% correlation with pdex results  
-- ✅ **Edge Cases**: NaN handling, empty groups, tie scenarios
-- ✅ **Memory Safety**: No memory leaks in long-running tests
+> The kernels aim to match `scipy.stats.mannwhitneyu` numerically under equivalent settings.
 
 ---
 
-## 🐛 Troubleshooting
+## 🧷 Testing
 
-### Common Issues
+See **[test/README.md](test/README.md)** for full docs.
+
+**Quick test**
+
+```bash
+cd test
+python test.py config_quick.yml
+```
+
+**Full suite**
+
+```bash
+python test.py config.yml
+```
+
+---
+
+## ❓ FAQ
 
 <details>
-<summary><strong>Memory Error with Large Datasets</strong></summary>
-
-```python
-# Solution: Reduce batch size and subsample
-results = parallel_differential_expression(
-    adata,
-    groupby_key="treatment",
-    reference="control",
-    num_workers=4,    # Reduce workers
-    batch=500000      # Smaller batch size
-)
-
-# Or subsample the data
-sc.pp.subsample(adata, n_obs=50000)
-```
-
+<summary><strong>Does hpdex correct for multiple testing?</strong></summary>
+Yes. The returned <code>fdr</code> column applies Benjamini–Hochberg (BH) adjustment to the raw <code>p_value</code>s.
 </details>
 
 <details>
-<summary><strong>Performance Issues</strong></summary>
+<summary><strong>Why do I see extremely small <code>p_value</code>s (close to 0)?</strong></summary>
+For very large samples and strong effects, underflow can make values effectively <code>0.0</code> in float precision. This is expected; rely on <code>fdr</code> for decision making.
+</details>
 
-```python
-# Check your CPU cores
-import multiprocessing
-print(f"Available cores: {multiprocessing.cpu_count()}")
-
-# Optimize for your hardware
-results = parallel_differential_expression(
-    adata,
-    groupby_key="treatment", 
-    reference="control",
-    num_workers=min(16, multiprocessing.cpu_count()),  # Don't exceed available cores
-    prefer_hist_if_int=True  # Use histogram algorithm for integer data
-)
-```
-
+<details>
+<summary><strong>When should I prefer the Histogram kernel?</strong></summary>
+When the data are integer UMI counts with limited range. It avoids full sorting per target and is usually faster and more memory‑efficient.
 </details>
 
 ---
 
 ## 📄 License
 
-MIT License - see [LICENSE](LICENSE) for details.
+MIT License — see [LICENSE](LICENSE).
 
 ---
 
-## 🙏 Acknowledgments
-
-- **scipy** team for the foundational statistical implementations
-- **pdex** developers for the API design inspiration  
-- **numba** team for JIT compilation capabilities
-- **scanpy** community for single-cell analysis ecosystem
+<div align="center">
+  <sub>Built for large‑scale single‑cell perturbation analysis.</sub>
+</div>
