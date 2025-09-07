@@ -33,10 +33,7 @@ logger = logging.getLogger(__name__)
 SUPPORTED_METRICS = ["wilcoxon", "wilcoxon-hist"]
 
 
-
-
 # -- Worker Functions for Multiprocessing --
-
 def _chunk_worker(args) -> None:
     """
     Chunk worker for multiprocessing support.
@@ -161,9 +158,6 @@ def _create_shared_memory(X_dense: np.ndarray, ref_data_sorted: np.ndarray,
     }
     
     return (data_shm, ref_shm, result_shm), (data_spec, ref_spec, result_spec)
-
-
-
 
 
 def _create_presorted_ref_data(adata: ad.AnnData, ref_rows: np.ndarray) -> np.ndarray:
@@ -299,11 +293,6 @@ def _compute_fdr(p_matrix: np.ndarray, method: str = 'fdr_bh') -> np.ndarray:
     except Exception as e:
         logging.warning(f"FDR correction failed, using original p-values: {e}")
         return p_matrix.copy()
-
-
-# Note: Histogram pools are thread-local within each process
-# No shared memory needed - each worker process creates its own histogram pools
-# This avoids inter-process synchronization overhead while keeping memory usage reasonable
 
 
 def _auto_schedule_chunk_size(
