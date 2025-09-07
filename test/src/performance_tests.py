@@ -4,23 +4,25 @@ Performance Tests
 Benchmarks HPDEX against scipy and pdex for performance validation.
 """
 
-import time
-import tempfile
-import psutil
 import os
-from pathlib import Path
-from typing import Tuple, Dict, Any, List
-import numpy as np
-import pandas as pd
-import anndata as ad
-from scipy.stats import mannwhitneyu
-
 # Import libraries
 import sys
+import tempfile
+import time
+from pathlib import Path
+from typing import Any, Dict, List, Tuple
+
+import anndata as ad
+import numpy as np
+import pandas as pd
+import psutil
+from scipy.stats import mannwhitneyu
+
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 # Import HPDEX
-from hpdex import parallel_differential_expression, parallel_differential_expression_stream
+from hpdex import (parallel_differential_expression,
+                   parallel_differential_expression_stream)
 from hpdex.kernel import rank_sum_chunk_kernel_float
 
 # Import pdex for comparison

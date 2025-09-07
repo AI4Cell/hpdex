@@ -14,17 +14,15 @@ import sys
 import time
 import traceback
 from pathlib import Path
+from typing import Any, Dict
 
 import yaml
-import numpy as np
-import pandas as pd
-from typing import Dict, Any, List
 
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from src.test_runner import TestRunner
-from src.test_utils import setup_logging, save_results, create_output_dir
+from src.test_utils import create_output_dir, save_results, setup_logging
 
 
 def load_config(config_path: Path) -> Dict[str, Any]:

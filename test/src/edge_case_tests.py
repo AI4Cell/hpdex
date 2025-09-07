@@ -4,15 +4,16 @@ Edge Case Tests
 Tests HPDEX robustness with challenging scenarios.
 """
 
-import numpy as np
-import pandas as pd
-import anndata as ad
-from typing import Tuple, Dict, Any
-from scipy.sparse import csr_matrix
-
 # Import HPDEX
 import sys
 from pathlib import Path
+from typing import Any, Dict, Tuple
+
+import anndata as ad
+import numpy as np
+import pandas as pd
+from scipy.sparse import csr_matrix
+
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from hpdex import parallel_differential_expression

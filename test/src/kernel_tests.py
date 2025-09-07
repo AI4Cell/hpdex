@@ -4,17 +4,19 @@ Kernel Consistency Tests
 Tests HPDEX kernels against scipy for correctness validation.
 """
 
-import numpy as np
-import scipy.stats as stats
-from typing import Tuple, Dict, Any
-from tqdm import tqdm
-
 # Import HPDEX kernels
 import sys
 from pathlib import Path
+from typing import Any, Dict, Tuple
+
+import numpy as np
+import scipy.stats as stats
+from tqdm import tqdm
+
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from hpdex.kernel import rank_sum_chunk_kernel_float, rank_sum_chunk_kernel_hist
+from hpdex.kernel import (rank_sum_chunk_kernel_float,
+                          rank_sum_chunk_kernel_hist)
 
 
 class KernelConsistencyTester:

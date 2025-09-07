@@ -4,15 +4,16 @@ Pipeline Consistency Tests
 Tests HPDEX pipeline against pdex for consistency validation.
 """
 
-import numpy as np
-import pandas as pd
-import anndata as ad
-from typing import Tuple, Dict, Any
-from scipy.stats import pearsonr, spearmanr
-
 # Import libraries
 import sys
 from pathlib import Path
+from typing import Any, Dict, Tuple
+
+import anndata as ad
+import numpy as np
+import pandas as pd
+from scipy.stats import pearsonr, spearmanr
+
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 # Import HPDEX

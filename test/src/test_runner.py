@@ -4,23 +4,23 @@ Test Runner for HPDEX Testing Framework
 Handles execution of different test categories and manages test flow.
 """
 
-import time
 import tempfile
+import time
 import warnings
-from pathlib import Path
-from typing import Dict, Any, Tuple, List, Optional
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from tqdm import tqdm
 
+from .data_generators import SyntheticDataGenerator
+from .edge_case_tests import EdgeCaseTester
 # Import testing modules
 from .kernel_tests import KernelConsistencyTester
-from .pipeline_tests import PipelineConsistencyTester  
 from .performance_tests import PerformanceTester
-from .edge_case_tests import EdgeCaseTester
+from .pipeline_tests import PipelineConsistencyTester
 from .real_data_tests import RealDataBenchmarkTester
-from .data_generators import SyntheticDataGenerator
 
 
 @dataclass

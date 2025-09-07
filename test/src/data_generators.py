@@ -4,10 +4,11 @@ Synthetic Data Generators for HPDEX Testing
 Generates realistic test datasets for various testing scenarios.
 """
 
+from typing import Optional, Tuple
+
+import anndata as ad
 import numpy as np
 import pandas as pd
-import anndata as ad
-from typing import Tuple, Optional
 from scipy.sparse import csr_matrix
 
 

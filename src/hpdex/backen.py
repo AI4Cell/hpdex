@@ -21,7 +21,6 @@ from typing import List, Optional, Tuple
 import anndata as ad
 import numpy as np
 import pandas as pd
-from scipy.sparse import csc_matrix, csr_matrix
 from scipy.stats import false_discovery_control
 from tqdm import tqdm
 
@@ -477,7 +476,6 @@ def _execute_multiprocess_computation(
     
     try:
         # Determine number of processes
-        import multiprocessing as mp
         num_processes = min(len(tasks), mp.cpu_count())
         
         # Prepare worker arguments

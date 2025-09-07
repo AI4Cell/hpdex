@@ -7,16 +7,17 @@ This module tests HPDEX against pdex using real single-cell datasets to evaluate
 - Scalability with real data characteristics
 """
 
-import time
-import tempfile
-import psutil
-import os
 import gc
+import os
+import tempfile
+import time
 from pathlib import Path
-from typing import Dict, List, Any, Tuple, Optional
+from typing import Any, Dict, List, Optional, Tuple
+
+import anndata as ad
 import numpy as np
 import pandas as pd
-import anndata as ad
+import psutil
 from tqdm import tqdm
 
 # Import HPDEX
@@ -24,12 +25,13 @@ try:
     import sys
     sys.path.insert(0, '../src')
     from hpdex import parallel_differential_expression
-    from hpdex.stream import parallel_differential_expression as parallel_differential_expression_stream
+    from hpdex.stream import \
+        parallel_differential_expression as \
+        parallel_differential_expression_stream
 except ImportError as e:
     raise ImportError(f"Failed to import HPDEX: {e}")
 
 from pdex import parallel_differential_expression as pdex_de
-
 
 
 class RealDataBenchmarkTester:
