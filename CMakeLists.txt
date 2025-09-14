@@ -8,6 +8,10 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
+# 导出编译命令，生成 compile_commands.json 文件
+# 这对于代码补全、静态分析和 IDE 支持非常有用
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 # 获取项目根目录
 get_filename_component(ROOT_DIR ${CMAKE_CURRENT_SOURCE_DIR} ABSOLUTE)
 set(LIB_DIR "${ROOT_DIR}/Lib")

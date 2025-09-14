@@ -7,14 +7,14 @@
 #include <type_traits>
 #include <cstring>
 
-#include "config.hpp"
+#include "config.hpp" // HWY_STATIC_DEFINE
 #include "macro.hpp"
 
 // ================================================================
 //      Conditional include Highway or fallback
 // ================================================================
 #if USE_HIGHWAY
-  #include <hwy/highway.h>
+  #include <hwy/highway.h> 
   #include <hwy/contrib/math/math-inl.h>
   #include <hwy/contrib/sort/vqsort-inl.h>
   namespace hn = hwy::HWY_NAMESPACE;

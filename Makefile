@@ -385,3 +385,17 @@ package: build
 
 # 设置默认目标
 .DEFAULT_GOAL := help
+
+
+.PHONY: push
+push:
+	@echo "$(BLUE)[git]$(RESET) 自动commit并push代码到远程仓库..."
+	@git add . && git commit -m "autometicly commit[$(shell date +%Y-%m-%d)]"
+	@git push origin $(shell git branch --show-current)
+	@echo "$(GREEN)[完成]$(RESET) 推送完成"
+
+.PHONY: pull
+pull:
+	@echo "$(BLUE)[git]$(RESET) 自动pull代码到本地..."
+	@git pull origin $(shell git branch --show-current)
+	@echo "$(GREEN)[完成]$(RESET) 拉取完成"

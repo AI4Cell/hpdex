@@ -14,6 +14,10 @@
 #define USE_HIGHWAY 1
 #endif
 
+#ifndef HWY_STATIC_DEFINE
+#define HWY_STATIC_DEFINE 1
+#endif
+
 #define ALIGN_SIZE 64
 
 #define PROJECT_NAME hpdex
