@@ -13,3 +13,8 @@ uv.lock
 .pytest_cache/
 test/test_data
 test/test_results
+
+Lib/
+build/
+.DS_Store
+.cache

@@ -23,6 +23,7 @@ import numpy as np
 import pandas as pd
 from scipy.stats import false_discovery_control
 from tqdm import tqdm
+import multiprocessing.shared_memory as shm
 
 from .kernel import rank_sum_chunk_kernel_float, rank_sum_chunk_kernel_hist
 
@@ -41,9 +42,8 @@ def _chunk_worker(args) -> None:
         args: Tuple containing worker specifications and task parameters
     """
     (data_spec, ref_spec, result_spec, task, metric, tie_correction, 
-     continuity_correction, use_asymptotic, max_bins) = args
+     continuity_correction, use_asymptotic, max_bins, use_hist) = args
     
-    import multiprocessing.shared_memory as shm
     
     data_shm = None
     ref_shm = None  
@@ -71,28 +71,25 @@ def _chunk_worker(args) -> None:
         if metric == "wilcoxon":
             # Float kernel expects pre-sorted data, shape (n_genes, n_cells)
             ref_chunk = ref_data_sorted[:, gene_start:gene_end].T  # (n_genes_chunk, n_ref_cells)
-            tar_chunk = np.sort(target_data_dense[:, gene_start:gene_end].T, axis=1)  # (n_genes_chunk, n_target_cells)
-            
-            chunk_p, chunk_u = rank_sum_chunk_kernel_float(
-                ref_chunk, tar_chunk,
-                tie_correction=tie_correction,
-                continuity_correction=continuity_correction,
-                use_asymptotic=use_asymptotic
-            )
-        
-        elif metric == "wilcoxon-hist":
-            # Hist kernel expects unsorted data, shape (n_genes, n_cells)
-            ref_chunk = ref_data_sorted[:, gene_start:gene_end].T  # (n_genes_chunk, n_ref_cells)
-            tar_chunk = target_data_dense[:, gene_start:gene_end].T  # (n_genes_chunk, n_target_cells)
-            
-            # Use the histogram kernel implementation - it has its own pool management
-            chunk_p, chunk_u = rank_sum_chunk_kernel_hist(
-                ref_chunk, tar_chunk.astype(np.int64),
-                tie_correction=tie_correction,
-                continuity_correction=continuity_correction,
-                use_asymptotic=use_asymptotic,
-                max_bins=max_bins
-            )
+            if use_hist:
+                tar_chunk = target_data_dense[:, gene_start:gene_end].T  # (n_genes_chunk, n_target_cells)
+                
+                chunk_p, chunk_u = rank_sum_chunk_kernel_hist(
+                    ref_chunk, tar_chunk.astype(np.int64),
+                    tie_correction=tie_correction,
+                    continuity_correction=continuity_correction,
+                    use_asymptotic=use_asymptotic,
+                    max_bins=max_bins
+                )
+            else:
+                tar_chunk = np.sort(target_data_dense[:, gene_start:gene_end].T, axis=1)  # (n_genes_chunk, n_target_cells)
+                
+                chunk_p, chunk_u = rank_sum_chunk_kernel_float(
+                    ref_chunk, tar_chunk,
+                    tie_correction=tie_correction,
+                    continuity_correction=continuity_correction,
+                    use_asymptotic=use_asymptotic
+                )
         
         # Store results in shared memory
         p_start = group_idx * n_genes_total + gene_start
@@ -159,35 +156,34 @@ def _create_shared_memory(X_dense: np.ndarray, ref_data_sorted: np.ndarray,
     return (data_shm, ref_shm, result_shm), (data_spec, ref_spec, result_spec)
 
 
-def _create_presorted_ref_data(adata: ad.AnnData, ref_rows: np.ndarray) -> np.ndarray:
-    """Create pre-sorted reference group data (optimized version).
+def _create_presorted_ref_data(adata: ad.AnnData, ref_rows: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Create pre-sorted reference group data and dense matrix (optimized version).
     
     Args:
         adata: AnnData object containing gene expression data
         ref_rows: Row indices for reference group
         
     Returns:
-        Pre-sorted reference group data with shape (n_genes, n_ref_samples)
+        Tuple of (X_dense, ref_data_sorted) where:
+            - X_dense: Dense matrix with shape (n_cells, n_genes)
+            - ref_data_sorted: Pre-sorted reference group data with shape (n_ref_samples, n_genes)
     """
     n_genes = adata.n_vars
     n_ref = len(ref_rows)
     
-    logger.info(f"Sorting reference group data ({n_genes} genes x {n_ref} samples)...")
+    logger.info(f"Converting to dense matrix and sorting reference group data ({n_genes} genes x {n_ref} samples)...")
     
+    # Convert to dense matrix
     if hasattr(adata.X, 'toarray'):  # Sparse matrix
-        # Extract all reference group data at once, then transpose
-        ref_data = adata.X[ref_rows, :].toarray().T  # shape: (n_genes, n_ref)
+        X_dense = adata.X.toarray()
     else:  # Dense matrix
-        ref_data = adata.X[ref_rows, :].T.copy()  # Transpose and copy
+        X_dense = adata.X.copy()
     
-    # Allocate output memory based on data type
-    ref_data_sorted = np.empty((n_genes, n_ref), dtype=adata.X.dtype)
+    # Extract reference data and sort
+    ref_data = X_dense[ref_rows, :]  # shape: (n_ref, n_genes)
+    ref_data_sorted = np.sort(ref_data, axis=0)  # Sort along gene axis
     
-    # Batch sort all genes - much faster than gene-by-gene sorting
-    for i in tqdm(range(n_genes), desc="Sorting reference group genes"):
-        ref_data_sorted[i, :] = np.sort(ref_data[i, :])
-    
-    return ref_data_sorted
+    return X_dense, ref_data_sorted
 
 
 def _compute_fold_changes(target_means: np.ndarray, ref_means: np.ndarray, 
@@ -299,11 +295,12 @@ def _auto_schedule_chunk_size(
     data_size_mb: float
 ) -> int:
     """
-    Automatically determine optimal chunk size based on data characteristics.
+    Automatically determine optimal chunk size for gene-level processing.
     
-    Based on ablation study results:
-    - hpdex is insensitive to chunk size (CV < 0.05 in most cases)
-    - Can optimize purely for task distribution without performance penalty
+    Optimized strategy:
+    - Single worker: process all genes at once (no chunking needed)
+    - Multi-worker: balance between parallelization and overhead
+    - Focus on gene-level chunking, not group-level
     
     Args:
         n_genes: Number of genes
@@ -312,33 +309,27 @@ def _auto_schedule_chunk_size(
         data_size_mb: Approximate data size in MB
         
     Returns:
-        Optimal chunk size (number of gene-group combinations per chunk)
+        Optimal chunk size (number of genes per chunk)
     """
     
-    total_tasks = n_genes * n_groups
-    
-    # Strategy based on ablation study findings
     if num_workers == 1:
-        # Single worker: use larger chunks to minimize overhead
-        # Ablation showed single-worker performance is excellent regardless of chunk size
-        chunk_size = total_tasks  # Single large chunk
-        logger.info(f"Auto-scheduling: Single worker mode, chunk_size={chunk_size}")
+        # Single worker: no chunking needed, process all genes at once
+        chunk_size = n_genes
+        logger.info(f"Auto-scheduling: Single worker mode, chunk_size={chunk_size} (all genes)")
         
     else:
-        # Multi-worker: balance between parallelization and overhead
-        # Target 2-4 chunks per worker for good load balancing
-        target_chunks_per_worker = 3
+        # Multi-worker: minimize Python loop overhead while ensuring load balancing
+        # Use minimal chunks for load balancing (1-2 chunks per worker)
+        target_chunks_per_worker = 1  # Minimize Python loop overhead
         
-        if data_size_mb < 50:  # Small dataset
-            target_chunks_per_worker = 2  # Fewer chunks to reduce overhead
-        elif data_size_mb > 500:  # Large dataset
-            target_chunks_per_worker = 4  # More chunks for better load balancing
+        if data_size_mb > 1024:  # Very large dataset
+            target_chunks_per_worker = 2  # Slightly more chunks for better load balancing
             
         target_total_chunks = num_workers * target_chunks_per_worker
-        chunk_size = max(50, total_tasks // target_total_chunks)  # Minimum 50 tasks per chunk
+        chunk_size = max(4096, n_genes // target_total_chunks)  # Large chunks to minimize Python overhead
         
         logger.info(f"Auto-scheduling: {num_workers} workers, target {target_chunks_per_worker} chunks/worker, "
-                   f"chunk_size={chunk_size}")
+                   f"chunk_size={chunk_size} genes/chunk (minimizing Python loop overhead)")
     
     return chunk_size
 
@@ -394,48 +385,36 @@ def _execute_singlethread_computation(
     """Execute single-threaded computation for all groups."""
     all_results = []
     
-    for group_idx, (group_name, group_indices) in enumerate(zip(group_names, group_rows)):
-        logger.info(f"📊 Processing {group_name}: {len(group_indices)} cells")
+    for group_name, group_indices in tqdm(zip(group_names, group_rows), 
+                                                               total=len(group_names),
+                                                               desc="Processing groups"):
         target_data_dense = X_dense[group_indices]  # (n_target_cells, n_genes)
         
-        # Prepare output arrays
-        p_values = np.zeros(n_genes, dtype=np.float64)
-        u_stats = np.zeros(n_genes, dtype=np.float64)
-        
-        # Process in chunks for memory efficiency
-        for gene_start in tqdm(range(0, n_genes, chunk_size), 
-                             desc=f"Processing {group_name}"):
-            gene_end = min(n_genes, gene_start + chunk_size)
-            
-            # Prepare data for the kernel based on metric type
-            if metric == "wilcoxon":
-                # Float kernel expects pre-sorted data, shape (n_genes, n_cells)
-                ref_chunk = ref_data_sorted[:, gene_start:gene_end].T  # (n_genes, n_ref_cells)
-                if use_hist:
-                    tar_chunk = target_data_dense[:, gene_start:gene_end].T  # (n_genes, n_target_cells)
+        # Prepare data for the kernel based on metric type (single-threaded: no chunking needed)
+        if metric == "wilcoxon":
+            # Float kernel expects pre-sorted data, shape (n_genes, n_cells)
+            ref_chunk = ref_data_sorted.T  # (n_genes, n_ref_cells)
+            if use_hist:
+                tar_chunk = target_data_dense.T  # (n_genes, n_target_cells)
                 
-                    chunk_p, chunk_u = rank_sum_chunk_kernel_hist(
-                        ref_chunk, tar_chunk.astype(np.int64),
-                        tie_correction=tie_correction,
-                        continuity_correction=continuity_correction,
-                        use_asymptotic=use_asymptotic,
-                        max_bins=max_bins
-                    )
-                else:
-                    tar_chunk = np.sort(target_data_dense[:, gene_start:gene_end].T, axis=1)  # (n_genes, n_target_cells)
-                    
-                    chunk_p, chunk_u = rank_sum_chunk_kernel_float(
-                        ref_chunk, tar_chunk,
-                        tie_correction=tie_correction,
-                        continuity_correction=continuity_correction,
-                        use_asymptotic=use_asymptotic
-                    )
+                p_values, u_stats = rank_sum_chunk_kernel_hist(
+                    ref_chunk, tar_chunk.astype(np.int64),
+                    tie_correction=tie_correction,
+                    continuity_correction=continuity_correction,
+                    use_asymptotic=use_asymptotic,
+                    max_bins=max_bins
+                )
             else:
-                # TODO
-                raise ValueError(f"Unsupported metric: {metric}; supported metrics: {SUPPORTED_METRICS}")
-            
-            p_values[gene_start:gene_end] = chunk_p
-            u_stats[gene_start:gene_end] = chunk_u
+                tar_chunk = np.sort(target_data_dense.T, axis=1)  # (n_genes, n_target_cells)
+                
+                p_values, u_stats = rank_sum_chunk_kernel_float(
+                    ref_chunk, tar_chunk,
+                    tie_correction=tie_correction,
+                    continuity_correction=continuity_correction,
+                    use_asymptotic=use_asymptotic
+                )
+        else:
+            raise ValueError(f"Unsupported metric: {metric}; supported metrics: {SUPPORTED_METRICS}")
         
         # Store results for this group
         group_results = pd.DataFrame({
@@ -461,7 +440,8 @@ def _execute_multiprocess_computation(
     continuity_correction: bool,
     use_asymptotic: Optional[bool],
     max_bins: int,
-    gene_names: np.ndarray
+    gene_names: np.ndarray,
+    use_hist: bool
 ) -> List[pd.DataFrame]:
     """Execute multiprocess computation for all groups."""
     
@@ -482,7 +462,7 @@ def _execute_multiprocess_computation(
         worker_args = []
         for task in tasks:
             args = (data_spec, ref_spec, result_spec, task, metric,
-                   tie_correction, continuity_correction, use_asymptotic, max_bins)
+                   tie_correction, continuity_correction, use_asymptotic, max_bins, use_hist)
             worker_args.append(args)
         
         # Execute tasks in parallel
@@ -613,15 +593,15 @@ def parallel_differential_expression(
     n_genes = adata.n_vars
     
     # Validate metric parameter
-    if metric not in ["wilcoxon", "wilcoxon-hist"]:
-        raise ValueError(f"Unsupported statistical test method: {metric}. Available: ['wilcoxon', 'wilcoxon-hist']")
+    if metric not in SUPPORTED_METRICS:
+        raise ValueError(f"Unsupported statistical test method: {metric}. Available: {SUPPORTED_METRICS}")
     
     # Determine whether to use histogram algorithm
     use_hist = (prefer_hist_if_int and np.issubdtype(adata.X.dtype, np.integer) and num_workers > 1)
 
-    # Pre-sort reference group data for optimal performance
+    # Pre-sort reference group data and convert to dense matrix
     logger.info("Creating pre-sorted reference data...")
-    ref_data_sorted = _create_presorted_ref_data(adata, row_idx_ref)
+    X_dense, ref_data_sorted = _create_presorted_ref_data(adata, row_idx_ref)
 
     # Automatic task scheduling based on data characteristics
     logger.info("🤖 Optimizing task scheduling...")
@@ -630,19 +610,8 @@ def parallel_differential_expression(
     logger.info(f"   Size: {data_size_mb:.1f} MB")
     logger.info(f"   Workers: {num_workers}")
     
-    # Convert to dense for efficient processing (modern approach)
-    logger.info("📊 Converting to dense matrix for optimal performance...")
-    if hasattr(adata.X, 'toarray'):
-        X_dense = adata.X.toarray()
-    else:
-        X_dense = adata.X
-    
-    # Pre-sort reference data for optimal performance
-    ref_data_sorted = np.sort(X_dense[row_idx_ref], axis=0)  # (n_ref_cells, n_genes)
-    
     # Use auto-calculated chunk size
     chunk_size = _auto_schedule_chunk_size(n_genes, len(group_rows), num_workers, data_size_mb)
-    logger.info(f"Auto-scheduling: {num_workers} workers, target {num_workers * 2} chunks/worker, chunk_size={chunk_size}")
     
     # Execute computation (single-thread or multi-process)
     all_results = []
@@ -652,7 +621,7 @@ def parallel_differential_expression(
         all_results = _execute_multiprocess_computation(
             X_dense, ref_data_sorted, group_rows, group_names, n_genes,
             chunk_size, metric, tie_correction, continuity_correction, 
-            use_asymptotic, max_bins, adata.var.index.values
+            use_asymptotic, max_bins, adata.var.index.values, use_hist
         )
     else:
         logger.info("🔧 Using single-threaded processing")
