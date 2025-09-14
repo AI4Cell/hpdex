@@ -29,7 +29,7 @@ install_eigen() {
 }
 
 # ============================================
-# 2. LibTorch (使用官方安装方法)
+# 2. LibTorch (智能检测 CUDA 并下载对应版本)
 # ============================================
 install_libtorch() {
     echo "===> 安装 LibTorch"
@@ -41,10 +41,21 @@ install_libtorch() {
         return 0
     fi
     
+    # 检测 CUDA 可用性
+    local cuda_available=false
+    if command -v nvidia-smi &> /dev/null; then
+        if nvidia-smi &> /dev/null; then
+            cuda_available=true
+            echo "✅ 检测到 CUDA 支持"
+        fi
+    fi
+    
     # 方法1: 检查本地是否有 LibTorch 安装
     local local_torch_paths=(
         "/Users/wzq/local/libtorch_2.5.1_cpu/libtorch"
+        "/Users/wzq/local/libtorch_2.5.1_cuda/libtorch"
         "${HOME}/local/libtorch_2.5.1_cpu/libtorch"
+        "${HOME}/local/libtorch_2.5.1_cuda/libtorch"
         "/usr/local/libtorch"
         "/opt/libtorch"
     )
@@ -61,7 +72,15 @@ install_libtorch() {
     # 方法2: 使用 conda 安装 (如果可用)
     if command -v conda &> /dev/null; then
         echo "使用 conda 安装 LibTorch..."
-        if conda install -c pytorch pytorch-cpu -y; then
+        local conda_package="pytorch-cpu"
+        if [ "$cuda_available" = true ] && [[ "${OS}" != "darwin" ]]; then
+            conda_package="pytorch"
+            echo "安装 CUDA 版本的 PyTorch"
+        else
+            echo "安装 CPU 版本的 PyTorch"
+        fi
+        
+        if conda install -c pytorch "$conda_package" -y; then
             # 找到 conda 安装的 LibTorch 路径
             local conda_torch_path=$(conda info --envs | grep -E '^\*' | awk '{print $NF}')/lib/python*/site-packages/torch
             if [ -d "${conda_torch_path}" ]; then
@@ -79,7 +98,15 @@ install_libtorch() {
     # 方法3: 使用 pip 安装 (如果可用)
     if command -v pip &> /dev/null; then
         echo "使用 pip 安装 LibTorch..."
-        if pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu; then
+        local pip_index="https://download.pytorch.org/whl/cpu"
+        if [ "$cuda_available" = true ] && [[ "${OS}" != "darwin" ]]; then
+            pip_index="https://download.pytorch.org/whl/cu121"
+            echo "安装 CUDA 版本的 PyTorch"
+        else
+            echo "安装 CPU 版本的 PyTorch"
+        fi
+        
+        if pip install torch torchvision torchaudio --index-url "$pip_index"; then
             # 找到 pip 安装的 LibTorch 路径
             local pip_torch_path=$(python -c "import torch; print(torch.__path__[0])" 2>/dev/null)
             if [ -d "${pip_torch_path}" ]; then
@@ -94,17 +121,30 @@ install_libtorch() {
         fi
     fi
     
-    # 方法4: 手动下载 (备用方案)
+    # 方法4: 手动下载 LibTorch
     echo "尝试手动下载 LibTorch..."
     local torch_ver="2.5.0"
     local url=""
     
     if [[ "${OS}" == "darwin" ]]; then
+        echo "⚠️ macOS 不支持 CUDA，下载 CPU 版本"
         url="https://download.pytorch.org/libtorch/cpu/libtorch-macos-${torch_ver}.zip"
     elif [[ "${OS}" == "linux" ]]; then
-        url="https://download.pytorch.org/libtorch/cpu/libtorch-shared-with-deps-${torch_ver}%2Bcpu.zip"
+        if [ "$cuda_available" = true ]; then
+            echo "🚀 下载 CUDA 12.1 版本"
+            url="https://download.pytorch.org/libtorch/cu121/libtorch-cxx11-abi-shared-with-deps-${torch_ver}%2Bcu121.zip"
+        else
+            echo "💻 下载 CPU 版本"
+            url="https://download.pytorch.org/libtorch/cpu/libtorch-cxx11-abi-shared-with-deps-${torch_ver}.zip"
+        fi
     elif [[ "${OS}" =~ (mingw|msys|cygwin) ]]; then
-        url="https://download.pytorch.org/libtorch/cpu/libtorch-win-shared-with-deps-${torch_ver}%2Bcpu.zip"
+        if [ "$cuda_available" = true ]; then
+            echo "🚀 下载 CUDA 12.1 版本"
+            url="https://download.pytorch.org/libtorch/cu121/libtorch-win-shared-with-deps-${torch_ver}%2Bcu121.zip"
+        else
+            echo "💻 下载 CPU 版本"
+            url="https://download.pytorch.org/libtorch/cpu/libtorch-win-shared-with-deps-${torch_ver}.zip"
+        fi
     else
         echo "不支持的系统: ${OS}"
         exit 1
@@ -122,10 +162,14 @@ install_libtorch() {
         fi
     fi
     
-    echo "所有安装方法都失败了"
+    echo "❌ 所有安装方法都失败了"
     echo "请手动安装 LibTorch:"
     echo "1. 访问 https://pytorch.org/get-started/locally/"
-    echo "2. 选择 CPU 版本和您的操作系统"
+    if [ "$cuda_available" = true ]; then
+        echo "2. 选择 CUDA 版本和您的操作系统"
+    else
+        echo "2. 选择 CPU 版本和您的操作系统"
+    fi
     echo "3. 按照官方说明安装"
     echo "4. 或者将 LibTorch 解压到 ${out}"
     exit 1
