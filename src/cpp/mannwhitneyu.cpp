@@ -7,7 +7,7 @@
 #include "simd.hpp"
 #include <cstdint>
 #include <sys/types.h>
-#include <ATen/cuda/CUDAContext.h>
+#include "cuda_tools.hpp"
 
 PROJECT_BEGIN
 
@@ -251,36 +251,6 @@ PARALLEL_END(old_threads);
 }
 
 
-
-template <typename T>
-void copy_to_gpu_offset(
-    const torch::Tensor& cpu_tensor,  // 源 CPU tensor
-    torch::Tensor& gpu_tensor,        // 目标 GPU tensor
-    size_t dst_offset,                // GPU 偏移量（元素数）
-    cudaStream_t stream = 0           // CUDA stream (默认0)
-) {
-    TORCH_CHECK(cpu_tensor.device().is_cpu(), "Source must be CPU tensor");
-    TORCH_CHECK(gpu_tensor.device().is_cuda(), "Destination must be GPU tensor");
-    TORCH_CHECK(cpu_tensor.scalar_type() == gpu_tensor.scalar_type(),
-                "Dtype mismatch between src and dst");
-
-    const auto numel = cpu_tensor.numel();
-    TORCH_CHECK(dst_offset + numel <= (size_t)gpu_tensor.numel(),
-                "copy_to_gpu_offset: target buffer overflow");
-
-    const T* src_ptr = cpu_tensor.data_ptr<T>();
-    T* dst_ptr = gpu_tensor.data_ptr<T>() + dst_offset;
-
-    cudaMemcpyAsync(
-        dst_ptr,
-        src_ptr,
-        numel * sizeof(T),
-        cudaMemcpyHostToDevice,
-        stream
-    );
-}
-
-
 // 根据clip移动内存到cpu和gpu
 using BadPoints = std::tuple<
     std::vector<size_t>, // group 坐标
@@ -299,13 +269,191 @@ force_inline_ BadPoints move_memory(
     const size_t& bucket_size,
     torch::Tensor& cpu_buf, // 坏点
     torch::Tensor& gpu_buf // 提前开辟
+);
+
+// #define REF_NORM 0.5
+// #define TAR_NORM 0
+// MWUResult mannwhitneyu_with_cuda(
+//     const std::variant<view::CscView, view::CsrView>& A,
+//     const torch::Tensor& group_id,
+//     const size_t& n_groups,
+//     const MannWhitneyuOption& option,
+//     const int threads,
+//     size_t* progress_ptr
+// ) {
+//     const torch::Tensor* data_ptr    = nullptr;
+//     const torch::Tensor* indices_ptr = nullptr;
+//     const torch::Tensor* indptr_ptr  = nullptr;
+//     size_t R = 0, C = 0, nnz = 0;
+//     const size_t G = n_groups;
+//     bool is_csc = false;
+
+//     if (std::holds_alternative<view::CscView>(A)) {
+//         const auto& A_view = std::get<view::CscView>(A);
+//         data_ptr    = &A_view.data_;
+//         indices_ptr = &A_view.indices_;
+//         indptr_ptr  = &A_view.indptr_;
+//         R = A_view.rows();
+//         C = A_view.cols();
+//         nnz  = A_view.nnz();
+//         is_csc = true;
+//     } else {
+//         const auto& A_view = std::get<view::CsrView>(A);
+//         data_ptr    = &A_view.data_;
+//         indices_ptr = &A_view.indices_;
+//         indptr_ptr  = &A_view.indptr_;
+//         C = A_view.rows(); // reverse and see as CscView
+//         R = A_view.cols();
+//         nnz  = A_view.nnz();
+//     }
+
+//     const auto& data = *data_ptr;
+//     const auto& indices = *indices_ptr;
+//     const auto& indptr = *indptr_ptr;
+
+//     const auto bucket = group_nnz(
+//         group_id.data_ptr<int64_t>(),
+//         indptr.data_ptr<int64_t>(),
+//         R,
+//         C,
+//         n_groups,
+//         threads
+//     );
+
+//     auto [ref_clip, ref_max] = search_clip(bucket.data(), R, option.max_clip, REF_NORM, threads);
+//     auto [tar_clip, tar_max] = search_clip(bucket.data() + C, C * (G - 1), option.max_clip, TAR_NORM, threads);
+//     tar_clip = tar_max < option.max_clip ? tar_max : tar_clip;
+
+//     return {torch::Tensor(), torch::Tensor()};
+// }
+
+template<class T>
+force_inline_ T array_normal_sf(T* z, const size_t& n) {
+    // 上尾概率：P(Z >= z)
+    // 使用可选 fast_erfc 包装，避免在热路径里多次触发 libc 调用开销
+    return 0.5 * fast_erfc(z / std::sqrt(2.0));
+
+    const size_t step = simd::lanes<T>();
+    size_t i = 0;
+    for (; i + step <= n; i += step) {
+        const auto v = simd::load<T>(z + i);
+        const auto v_res = erfc_v(v);
+        simd::store<T>(v_res, z + i);
+    }
+    if (i < n) {
+        const auto m = simd::mask_from_count<T>(n - i);
+        const auto v = simd::masked_load<T>(m, z + i);
+        const auto v_res = erfc_v(v);
+        simd::masked_store<T>(m, v_res, z + i);
+    }
+}
+
+
+template<class T>
+static FORCE_INLINE double p_exact(double U, size_t n1, size_t n2) {
+    using U64 = unsigned long long;
+
+    const size_t Umax = n1 * n2;
+    if UNLIKELY(Umax == 0) return 1.0;
+
+    // clamp & floor like SciPy
+    const double U_clip = std::max(0.0, std::min(static_cast<double>(Umax), U));
+    const size_t u_stat = static_cast<size_t>(std::floor(U_clip));
+
+    // DP buffers: only write 0..up each iteration; avoid O(SZ) clears
+    const size_t SZ = Umax + 1;
+    hpdexc::AlignedVector<U64, 64> dp(SZ);   // payload 未初始化没关系，我们只在 0..up 范围写
+    hpdexc::AlignedVector<U64, 64> ndp(SZ);
+
+    U64* RESTRICT dp_cur = dp.aligned_data();
+    U64* RESTRICT dp_nxt = ndp.aligned_data();
+
+    dp_cur[0] = 1ULL;
+
+    for (size_t i = 1; i <= n1; ++i) {
+        const size_t prev_up = (i - 1) * n2;
+        const size_t up      =  i      * n2;
+
+        if (up + HPDEXC_PREFETCH_DIST < SZ)
+            PREFETCH_W(dp_nxt + up + HPDEXC_PREFETCH_DIST, 1);
+
+        U64 win = 0ULL;
+
+        size_t u = 0;
+        const size_t bound1 = prev_up < up ? prev_up : up;
+        for (; u <= bound1; ++u) {
+            if (u + HPDEXC_PREFETCH_DIST <= prev_up)
+                PREFETCH_R(dp_cur + u + HPDEXC_PREFETCH_DIST, 1);
+            win += dp_cur[u];
+            if (u >= n2 + 1) win -= dp_cur[u - (n2 + 1)];
+            dp_nxt[u] = win;
+        }
+
+        for (; u <= up; ++u) {
+            if (u >= n2 + 1) win -= dp_cur[u - (n2 + 1)];
+            dp_nxt[u] = win;
+        }
+
+        U64* tmp = dp_cur; dp_cur = dp_nxt; dp_nxt = tmp;
+    }
+
+    double total = 0.0;
+    for (size_t u = 0; u <= Umax; ++u) {
+        if (u + HPDEXC_PREFETCH_DIST <= Umax)
+            PREFETCH_R(dp_cur + u + HPDEXC_PREFETCH_DIST, 1);
+        total += static_cast<double>(dp_cur[u]);
+    }
+
+    const size_t kc    = Umax - u_stat;
+    const size_t small = (u_stat < kc ? u_stat : kc);
+
+    double cdf_small = 0.0;
+    for (size_t u = 0; u <= small; ++u) {
+        if (u + HPDEXC_PREFETCH_DIST <= small)
+            PREFETCH_R(dp_cur + u + HPDEXC_PREFETCH_DIST, 1);
+        cdf_small += static_cast<double>(dp_cur[u]);
+    }
+    const double pmf_small = static_cast<double>(dp_cur[small]);
+
+    double sf_ge;
+    if (u_stat <= kc) {
+        sf_ge = 1.0 - cdf_small / total + pmf_small / total;
+    } else {
+        sf_ge = cdf_small / total;
+    }
+    return sf_ge;
+}
+
+
+
+
+using MWUCoreResult = std::tuple<std::vector<double>, std::vector<double>>;
+template<class T>
+force_inline_ MWUCoreResult 
+mwu_core(
+    const T* data,
+    const int64_t* indices,
+    const int64_t* indptr,
+    const size_t& R,
+    const size_t& C,
+    const size_t& nnz
 ) {
     
 }
 
 
-#define REF_NORM 0.5
-#define TAR_NORM 0
+
+
+
+
+
+
+
+
+
+// ========================
+// cpu implementation of 
+// ========================
 MWUResult mannwhitneyu(
     const std::variant<view::CscView, view::CsrView>& A,
     const torch::Tensor& group_id,
@@ -340,31 +488,10 @@ MWUResult mannwhitneyu(
         nnz  = A_view.nnz();
     }
 
-    const auto& data = *data_ptr;
-    const auto& indices = *indices_ptr;
-    const auto& indptr = *indptr_ptr;
-
-    const auto bucket = group_nnz(
-        group_id.data_ptr<int64_t>(),
-        indptr.data_ptr<int64_t>(),
-        R,
-        C,
-        n_groups,
-        threads
-    );
-
-    auto [ref_clip, ref_max] = search_clip(bucket.data(), R, option.max_clip, REF_NORM, threads);
-    auto [tar_clip, tar_max] = search_clip(bucket.data() + C, C * (G - 1), option.max_clip, TAR_NORM, threads);
-    tar_clip = tar_max < option.max_clip ? tar_max : tar_clip;
-
-
-    
-
-
-    
-
     
 }
+
+
 
 
 

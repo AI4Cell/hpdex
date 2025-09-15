@@ -76,8 +76,8 @@ struct CscView {
     force_inline_ size_t nnz() const { return nnz_; }
 
     static force_inline_ CscView from_torch(torch::Tensor data, torch::Tensor indices, torch::Tensor indptr, size_t rows, size_t cols, size_t nnz) {
-        indices = indices.to(torch::kInt64);
-        indptr = indptr.to(torch::kInt64);
+        indices = indices.to(torch::kInt64).to(torch::kCPU);
+        indptr = indptr.to(torch::kInt64).to(torch::kCPU);
         return CscView(data, indices, indptr, rows, cols, nnz);
     }
 
