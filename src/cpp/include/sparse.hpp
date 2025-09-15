@@ -62,8 +62,8 @@ private:
 
 struct CscView {
     torch::Tensor data_;
-    torch::Tensor indices_;      // 行索引 (row indices)
-    torch::Tensor indptr_;       // 列指针 (column pointers)  
+    torch::Tensor indices_;      // 行索引 (row indices) int64_t
+    torch::Tensor indptr_;       // 列指针 (column pointers) int64_t
     size_t rows_;
     size_t cols_;
     size_t nnz_;

@@ -9,12 +9,21 @@
   #define PARALLEL_REGION(threads) \
     _Pragma("omp parallel num_threads(threads)")
 
-  #define PARALLEL_FOR(SCHEDULE, LOOP) \
-    _Pragma(HPDEXC_STRINGIFY(omp for schedule(SCHEDULE))) \
-    { LOOP }
-
   #define THREAD_ID() omp_get_thread_num()
   #define MAX_THREADS() omp_get_max_threads()
+
+  // omp for
+  #define PARALLEL_FOR(SCHEDULE, ARGS, LOOP) \
+    _Pragma(HPDEXC_STRINGIFY(omp for schedule(SCHEDULE) ARGS)) \
+    { LOOP }
+
+  // atomic operation
+  #define ATOMIC(DO) \
+    _Pragma("omp atomic") { DO }
+
+  // critical section
+  #define CRITICAL(DO) \
+    _Pragma("omp critical") { DO }
 
   #define HPDEXC_STRINGIFY(x) HPDEXC_STRINGIFY_IMPL(x)
   #define HPDEXC_STRINGIFY_IMPL(x) #x
@@ -23,11 +32,13 @@
   #define PARALLEL_FOR(SCHEDULE, LOOP) { LOOP }
   #define THREAD_ID() 0
   #define MAX_THREADS() 1
+  #define ATOMIC(DO) { DO }
+  #define CRITICAL(DO) { DO }
 #endif
 
 
 // ============================================
-// 工具
+// tools
 // ============================================
 #if defined(_MSC_VER)
   #define force_inline_ __forceinline
@@ -56,7 +67,7 @@
   #define assume_aligned_(p, N) (p)
 #endif
 
-// 分支预测
+// branch prediction
 #if defined(__clang__) || defined(__GNUC__)
   #define likely_(x)   (__builtin_expect(!!(x), 1))
   #define unlikely_(x) (__builtin_expect(!!(x), 0))
@@ -65,7 +76,7 @@
   #define unlikely_(x) (x)
 #endif
 
-// 预取
+// prefetch
 #if defined(__clang__) || defined(__GNUC__)
   #define prefetch_r_(p,loc) __builtin_prefetch((p), 0, (loc))
   #define prefetch_w_(p,loc) __builtin_prefetch((p), 1, (loc))
@@ -74,7 +85,7 @@
   #define prefetch_w_(p,loc) ((void)0)
 #endif
 
-// 导出
+// export
 #if defined(_MSC_VER)
   #define export_ __declspec(dllexport)
 #else

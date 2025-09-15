@@ -106,7 +106,7 @@ force_inline_ void store_unaligned(const vec<T>& v, T* p) { hn::StoreU(v, D<T>{}
 // ---- Masked Load / Store ----
 template<class T>
 force_inline_ vec<T> masked_load(mask<T> m, const T* p, vec<T> v0 = zero<T>()) {
-    return hn::MaskedLoad(m, D<T>{}, p, v0);
+    return hn::MaskedLoad(m, D<T>{}, p);
 }
 
 template<class T>
