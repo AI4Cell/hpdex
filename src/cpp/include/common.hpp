@@ -4,10 +4,13 @@
 #include <cmath>
 #include "simd.hpp"
 
-
 namespace hpdex {
 
-// ----------- 标量 fast_erfc -----------
+// ================================================================
+// 标量工具
+// ================================================================
+
+// ----------- fast_erfc (double 专用) -----------
 force_inline_ double fast_erfc(double x) {
     const double ax = std::fabs(x);
     const double t  = 1.0 / (1.0 + 0.5 * ax);
@@ -52,7 +55,9 @@ force_inline_ void precompute_mu_inv_sd(
     inv_sd = (var <= 0.0) ? 0.0 : (1.0 / std::sqrt(var));
 }
 
-template<class T>
+// ================================================================
+// 标量 p 计算（double 专用）
+// ================================================================
 force_inline_ double p_asymptotic_two_sided(
     double U1, size_t n1, size_t n2,
     double tie_sum, double cc,
@@ -64,7 +69,6 @@ force_inline_ double p_asymptotic_two_sided(
     return 2.0 * normal_sf(z);
 }
 
-template<class T>
 force_inline_ double p_asymptotic_greater(
     double U1, size_t n1, size_t n2,
     double tie_sum, double cc,
@@ -76,7 +80,6 @@ force_inline_ double p_asymptotic_greater(
     return normal_sf(z);
 }
 
-template<class T>
 force_inline_ double p_asymptotic_less(
     double U1, size_t n1, size_t n2,
     double tie_sum, double cc,
@@ -88,230 +91,198 @@ force_inline_ double p_asymptotic_less(
     return 1.0 - normal_sf(z);
 }
 
-
-
-// -------- SIMD fast_erfc --------
+// ================================================================
+// SIMD 版本 (double 专用)
+// ================================================================
 template<class D>
-force_inline_ hn::Vec<D> fast_erfc_v(D d, hn::Vec<D> x) {
+HWY_INLINE hn::Vec<D> fast_erfc_v(D d, hn::Vec<D> x) {
     using T = hn::TFromD<D>;
-
-    auto ax = Abs(x);
+    auto ax   = hn::Abs(x);
     auto half = hn::Set(d, T(0.5));
     auto one  = hn::Set(d, T(1.0));
     auto two  = hn::Set(d, T(2.0));
 
     auto t = one / (one + half * ax);
 
-    // Abramowitz & Stegun 7.1.26-like approximation
-    auto tau = t * Exp(-ax*ax
-        - hn::Set(d, T(1.26551223))
+    auto neg_ax2 = hn::Neg(ax * ax);
+
+    auto tau = t * hn::Exp(d,
+        neg_ax2
+        + hn::Neg(hn::Set(d, T(1.26551223)))
         + t * (hn::Set(d, T(1.00002368))
         + t * (hn::Set(d, T(0.37409196))
         + t * (hn::Set(d, T(0.09678418))
-        + t * (hn::Set(d, T(-0.18628806))
-        + t * (hn::Set(d, T(0.27886807))
-        + t * (hn::Set(d, T(-1.13520398))
-        + t * (hn::Set(d, T(1.48851587))
-        + t * (hn::Set(d, T(-0.82215223))
-        + t * (hn::Set(d, T(0.17087277))))))))))));
+        + t * (hn::Neg(hn::Set(d, T(0.18628806))))
+        + t * (hn::Set(d, T(0.27886807)))
+        + t * (hn::Neg(hn::Set(d, T(1.13520398))))
+        + t * (hn::Set(d, T(1.48851587)))
+        + t * (hn::Neg(hn::Set(d, T(0.82215223))))
+        + t * (hn::Set(d, T(0.17087277)))))));
 
-    auto mask_pos = GtEq(x, hn::Zero(d));
-    auto r = IfThenElse(mask_pos, tau, two - tau);
+    auto mask_pos = hn::Ge(x, hn::Zero(d));
+    auto r = hn::IfThenElse(mask_pos, tau, two - tau);
 
-    // Clamp [0, 2]
-    r = Min(Max(r, hn::Zero(d)), two);
+    r = hn::Min(hn::Max(r, hn::Zero(d)), two);
     return r;
 }
 
-template<class D>
-force_inline_ hn::Vec<D> normal_sf_v(D d, hn::Vec<D> z) {
-    using T = hn::TFromD<D>;
-    auto inv_sqrt2 = hn::Set(d, T(1.0 / std::sqrt(2.0)));
+
+
+force_inline_ hn::Vec<HWY_FULL(double)> normal_sf_v(HWY_FULL(double) d, hn::Vec<HWY_FULL(double)> z) {
+    auto inv_sqrt2 = hn::Set(d, 1.0 / std::sqrt(2.0));
     auto arg = z * inv_sqrt2;
-    return hn::Mul(hn::Set(d, T(0.5)), fast_erfc_v<D>(d, arg));
+    return hn::Mul(hn::Set(d, 0.5), fast_erfc_v(d, arg));
 }
 
-template<class D>
 force_inline_ void precompute_mu_inv_sd_v(
-    D d,
-    hn::Vec<D> n1, hn::Vec<D> n2, hn::Vec<D> tie_sum,
-    hn::Vec<D>& mu, hn::Vec<D>& inv_sd
+    HWY_FULL(double) d,
+    hn::Vec<HWY_FULL(double)> n1, hn::Vec<HWY_FULL(double)> n2, hn::Vec<HWY_FULL(double)> tie_sum,
+    hn::Vec<HWY_FULL(double)>& mu, hn::Vec<HWY_FULL(double)>& inv_sd
 ) {
-    using T = hn::TFromD<D>;
-    auto dn1 = ConvertTo(d, n1);
-    auto dn2 = ConvertTo(d, n2);
-    auto N   = dn1 + dn2;
+    auto N   = n1 + n2;
+    mu = hn::Mul(hn::Set(d, 0.5), n1 * n2);
 
-    mu = hn::Mul(hn::Set(d, T(0.5)), dn1 * dn2);
+    auto one  = hn::Set(d, 1.0);
+    auto denom = N * (N - one);
+    auto base  = n1 * n2 / hn::Set(d, 12.0);
 
-    auto denom = N * (N - hn::Set(d, T(1.0)));
-    auto base  = dn1 * dn2 / hn::Set(d, T(12.0));
-
-    auto var = IfThenElse(
-        Gt(denom, hn::Zero(d)),
-        base * (N + hn::Set(d, T(1.0)) - tie_sum / denom),
-        dn1 * dn2 * (N + hn::Set(d, T(1.0))) / hn::Set(d, T(12.0))
+    auto var = hn::IfThenElse(
+        hn::Gt(denom, hn::Zero(d)),
+        base * (N + one - tie_sum / denom),
+        n1 * n2 * (N + one) / hn::Set(d, 12.0)
     );
 
-    inv_sd = IfThenElse(
-        Gt(var, hn::Zero(d)),
-        hn::Div(hn::Set(d, T(1.0)), Sqrt(var)),
+    inv_sd = hn::IfThenElse(
+        hn::Gt(var, hn::Zero(d)),
+        hn::Div(hn::Set(d, 1.0), hn::Sqrt(var)),
         hn::Zero(d)
     );
 }
 
-template<class D>
-force_inline_ hn::Vec<D> p_asymptotic_two_sided_v(
-    D d,
-    hn::Vec<D> U1,
-    hn::Vec<D> n1,
-    hn::Vec<D> n2,
-    hn::Vec<D> tie_sum,
-    hn::Vec<D> cc
+force_inline_ hn::Vec<HWY_FULL(double)> p_asymptotic_two_sided_v(
+    HWY_FULL(double) d,
+    hn::Vec<HWY_FULL(double)> U1,
+    hn::Vec<HWY_FULL(double)> n1,
+    hn::Vec<HWY_FULL(double)> n2,
+    hn::Vec<HWY_FULL(double)> tie_sum,
+    hn::Vec<HWY_FULL(double)> cc
 ) {
-    using T = hn::TFromD<D>;
-    hn::Vec<D> mu, invsd;
+    hn::Vec<HWY_FULL(double)> mu, invsd;
     precompute_mu_inv_sd_v(d, n1, n2, tie_sum, mu, invsd);
-
-    auto zero = hn::Zero(d);
-    auto one  = hn::Set(d, T(1.0));
-    auto two  = hn::Set(d, T(2.0));
-
-    auto z = (Abs(U1 - mu) - cc) * invsd;
-    auto sf = normal_sf_v<D>(d, z);
-    return IfThenElse(Eq(invsd, zero), one, two * sf);
+    auto z = (hn::Abs(U1 - mu) - cc) * invsd;
+    auto sf = normal_sf_v(d, z);
+    return hn::IfThenElse(hn::Eq(invsd, hn::Zero(d)), hn::Set(d, 1.0), hn::Set(d, 2.0) * sf);
 }
 
-template<class D>
-force_inline_ hn::Vec<D> p_asymptotic_greater_v(
-    D d,
-    hn::Vec<D> U1,
-    hn::Vec<D> n1,
-    hn::Vec<D> n2,
-    hn::Vec<D> tie_sum,
-    hn::Vec<D> cc
+force_inline_ hn::Vec<HWY_FULL(double)> p_asymptotic_greater_v(
+    HWY_FULL(double) d,
+    hn::Vec<HWY_FULL(double)> U1,
+    hn::Vec<HWY_FULL(double)> n1,
+    hn::Vec<HWY_FULL(double)> n2,
+    hn::Vec<HWY_FULL(double)> tie_sum,
+    hn::Vec<HWY_FULL(double)> cc
 ) {
-    using T = hn::TFromD<D>;
-    hn::Vec<D> mu, invsd;
+    hn::Vec<HWY_FULL(double)> mu, invsd;
     precompute_mu_inv_sd_v(d, n1, n2, tie_sum, mu, invsd);
-
-    auto zero = hn::Zero(d);
-    auto one  = hn::Set(d, T(1.0));
-
     auto z = (U1 - mu - cc) * invsd;
-    auto sf = normal_sf_v<D>(d, z);
-    return IfThenElse(Eq(invsd, zero), one, sf);
+    auto sf = normal_sf_v(d, z);
+    return hn::IfThenElse(hn::Eq(invsd, hn::Zero(d)), hn::Set(d, 1.0), sf);
 }
 
-template<class D>
-force_inline_ hn::Vec<D> p_asymptotic_less_v(
-    D d,
-    hn::Vec<D> U1,
-    hn::Vec<D> n1,
-    hn::Vec<D> n2,
-    hn::Vec<D> tie_sum,
-    hn::Vec<D> cc
+force_inline_ hn::Vec<HWY_FULL(double)> p_asymptotic_less_v(
+    HWY_FULL(double) d,
+    hn::Vec<HWY_FULL(double)> U1,
+    hn::Vec<HWY_FULL(double)> n1,
+    hn::Vec<HWY_FULL(double)> n2,
+    hn::Vec<HWY_FULL(double)> tie_sum,
+    hn::Vec<HWY_FULL(double)> cc
 ) {
-    using T = hn::TFromD<D>;
-    hn::Vec<D> mu, invsd;
+    hn::Vec<HWY_FULL(double)> mu, invsd;
     precompute_mu_inv_sd_v(d, n1, n2, tie_sum, mu, invsd);
-
-    auto zero = hn::Zero(d);
-    auto one  = hn::Set(d, T(1.0));
-
     auto z = (U1 - mu + cc) * invsd;
-    auto sf = normal_sf_v<D>(d, z);
-    return IfThenElse(Eq(invsd, zero), one, one - sf);
+    auto sf = normal_sf_v(d, z);
+    return hn::IfThenElse(hn::Eq(invsd, hn::Zero(d)), hn::Set(d, 1.0), hn::Set(d, 1.0) - sf);
 }
 
 // ================================================================
-// array 版本：批量计算
+// array 版本：批量计算（double 专用）
 // ================================================================
-template<class T>
 force_inline_ void array_p_asymptotic_two_sided(
-    const T* U1, const T* n1, const T* n2,
-    const T* tie_sum, const T* cc,
-    T* out, size_t N
+    const double* U1, const double* n1, const double* n2,
+    const double* tie_sum, const double* cc,
+    double* out, size_t N
 ) {
-    using D = HWY_FULL(T);
+    using D = HWY_FULL(double);
     D d;
     const size_t step = Lanes(d);
     size_t i = 0;
 
-    // SIMD 主循环
     for (; i + step <= N; i += step) {
-        auto vU1  = Load(d, U1 + i);
-        auto vn1  = Load(d, n1 + i);
-        auto vn2  = Load(d, n2 + i);
-        auto vts  = Load(d, tie_sum + i);
-        auto vcc  = Load(d, cc + i);
+        auto vU1  = hn::Load(d, U1 + i);
+        auto vn1  = hn::Load(d, n1 + i);
+        auto vn2  = hn::Load(d, n2 + i);
+        auto vts  = hn::Load(d, tie_sum + i);
+        auto vcc  = hn::Load(d, cc + i);
 
-        auto vp = p_asymptotic_two_sided_v<T>(d, vU1, vn1, vn2, vts, vcc);
-        Store(vp, d, out + i);
+        auto vp = p_asymptotic_two_sided_v(d, vU1, vn1, vn2, vts, vcc);
+        hn::Store(vp, d, out + i);
     }
-
-    // 尾巴 fallback
     for (; i < N; ++i) {
         double mu, invsd;
-        out[i] = p_asymptotic_two_sided<T>(U1[i], n1[i], n2[i], tie_sum[i], cc[i], mu, invsd);
+        out[i] = p_asymptotic_two_sided(U1[i], size_t(n1[i]), size_t(n2[i]), tie_sum[i], cc[i], mu, invsd);
     }
 }
 
-template<class T>
 force_inline_ void array_p_asymptotic_greater(
-    const T* U1, const T* n1, const T* n2,
-    const T* tie_sum, const T* cc,
-    T* out, size_t N
+    const double* U1, const double* n1, const double* n2,
+    const double* tie_sum, const double* cc,
+    double* out, size_t N
 ) {
-    using D = HWY_FULL(T);
+    using D = HWY_FULL(double);
     D d;
     const size_t step = Lanes(d);
     size_t i = 0;
 
     for (; i + step <= N; i += step) {
-        auto vU1  = Load(d, U1 + i);
-        auto vn1  = Load(d, n1 + i);
-        auto vn2  = Load(d, n2 + i);
-        auto vts  = Load(d, tie_sum + i);
-        auto vcc  = Load(d, cc + i);
+        auto vU1  = hn::Load(d, U1 + i);
+        auto vn1  = hn::Load(d, n1 + i);
+        auto vn2  = hn::Load(d, n2 + i);
+        auto vts  = hn::Load(d, tie_sum + i);
+        auto vcc  = hn::Load(d, cc + i);
 
-        auto vp = p_asymptotic_greater_v<T>(d, vU1, vn1, vn2, vts, vcc);
-        Store(vp, d, out + i);
+        auto vp = p_asymptotic_greater_v(d, vU1, vn1, vn2, vts, vcc);
+        hn::Store(vp, d, out + i);
     }
-
     for (; i < N; ++i) {
         double mu, invsd;
-        out[i] = p_asymptotic_greater<T>(U1[i], n1[i], n2[i], tie_sum[i], cc[i], mu, invsd);
+        out[i] = p_asymptotic_greater(U1[i], size_t(n1[i]), size_t(n2[i]), tie_sum[i], cc[i], mu, invsd);
     }
 }
 
-template<class T>
 force_inline_ void array_p_asymptotic_less(
-    const T* U1, const T* n1, const T* n2,
-    const T* tie_sum, const T* cc,
-    T* out, size_t N
+    const double* U1, const double* n1, const double* n2,
+    const double* tie_sum, const double* cc,
+    double* out, size_t N
 ) {
-    using D = HWY_FULL(T);
+    using D = HWY_FULL(double);
     D d;
     const size_t step = Lanes(d);
     size_t i = 0;
 
     for (; i + step <= N; i += step) {
-        auto vU1  = Load(d, U1 + i);
-        auto vn1  = Load(d, n1 + i);
-        auto vn2  = Load(d, n2 + i);
-        auto vts  = Load(d, tie_sum + i);
-        auto vcc  = Load(d, cc + i);
+        auto vU1  = hn::Load(d, U1 + i);
+        auto vn1  = hn::Load(d, n1 + i);
+        auto vn2  = hn::Load(d, n2 + i);
+        auto vts  = hn::Load(d, tie_sum + i);
+        auto vcc  = hn::Load(d, cc + i);
 
-        auto vp = p_asymptotic_less_v<T>(d, vU1, vn1, vn2, vts, vcc);
-        Store(vp, d, out + i);
+        auto vp = p_asymptotic_less_v(d, vU1, vn1, vn2, vts, vcc);
+        hn::Store(vp, d, out + i);
     }
-
     for (; i < N; ++i) {
         double mu, invsd;
-        out[i] = p_asymptotic_less<T>(U1[i], n1[i], n2[i], tie_sum[i], cc[i], mu, invsd);
+        out[i] = p_asymptotic_less(U1[i], size_t(n1[i]), size_t(n2[i]), tie_sum[i], cc[i], mu, invsd);
     }
 }
 
-
-}
+} // namespace hpdex

@@ -3,13 +3,8 @@
 #pragma once
 
 #include <cstddef>
-#include <cstdint>
-#include <cmath>
-#include <algorithm>
 #include <utility>
-#include <functional>
 #include <limits>
-#include <type_traits>
 #include <cstring>
 
 #include "config.hpp" // HWY_STATIC_DEFINE

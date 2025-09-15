@@ -16,19 +16,11 @@ struct MannWhitneyuOption {
     bool tie_correction;
     bool use_continuity;
 
-    size_t max_clip = 5000;
-    double quantile_q = 0.8;
-    double norm_k = 0.5;
-
     // 假设检验的方向
     enum Alternative { less = 0, greater = 1, two_sided = 2 } alternative;
 
     // 计算方法
-    enum Method { automatic = 0, exact = 1, asymptotic = 2 } method;
-
-    // threshold method
-    enum ThresholdMethod { none = 0, quantile = 1, norm = 2 } threshold_method;
-
+    enum Method { exact = 1, asymptotic = 2 } method;
 };
 
 MWUResult mannwhitneyu(

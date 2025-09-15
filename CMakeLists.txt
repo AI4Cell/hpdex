@@ -126,26 +126,27 @@ message(STATUS "========================================")
 # ============================================
 # Python 扩展模块
 # ============================================
-pybind11_add_module(hpdex_module
+pybind11_add_module(hpdex_cpp
     src/cpp/module.cpp
+    src/cpp/mannwhitneyu.cpp
     # 这里可以继续添加你的源码
 )
 
-target_compile_features(hpdex_module PRIVATE cxx_std_17)
+target_compile_features(hpdex_cpp PRIVATE cxx_std_17)
 
-target_include_directories(hpdex_module PRIVATE
+target_include_directories(hpdex_cpp PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src/cpp/include
     ${EIGEN3_INCLUDE_DIR}
 )
 
 if(USE_TORCH)
-    target_link_libraries(hpdex_module PRIVATE ${TORCH_LIBRARIES})
+    target_link_libraries(hpdex_cpp PRIVATE ${TORCH_LIBRARIES})
 endif()
 
 if(USE_HIGHWAY)
-    target_link_libraries(hpdex_module PRIVATE hwy)
+    target_link_libraries(hpdex_cpp PRIVATE hwy)
 endif()
 
 if(USE_OPENMP)
-    target_link_libraries(hpdex_module PRIVATE OpenMP::OpenMP_CXX)
+    target_link_libraries(hpdex_cpp PRIVATE OpenMP::OpenMP_CXX)
 endif()

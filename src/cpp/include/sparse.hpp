@@ -5,7 +5,7 @@
 #include <torch/torch.h>
 #include <Eigen/Sparse>
 
-PROJECT_BEGIN
+namespace hpdex {
 
 namespace view {
 struct CsrView {
@@ -114,4 +114,4 @@ private:
 };
 }
 
-PROJECT_END
+}
