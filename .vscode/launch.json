@@ -1,0 +1,21 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug test (lldb)",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "/Users/wzq/Documents/Code/Project/westlake/hpdex/cpp_test/build/test",
+      "args": [],
+      "stopAtEntry": true,
+      "cwd": "/Users/wzq/Documents/Code/Project/westlake/hpdex/cpp_test/build",
+      "environment": [
+        { "name": "DYLD_LIBRARY_PATH", "value": "/opt/homebrew/opt/libomp/lib" }
+      ],
+      "externalConsole": false,
+      "MIMode": "lldb",
+      "preLaunchTask": "Build test (cpp_test)"
+    }
+  ]
+}
+

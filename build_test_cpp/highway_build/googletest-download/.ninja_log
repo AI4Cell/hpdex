@@ -1,0 +1,21 @@
+# ninja log v7
+0	11	1757920014155711308	googletest-prefix/src/googletest-stamp/googletest-mkdir	cb0904ecfefa422e
+0	11	1757920014155711308	/Users/wzq/Documents/Code/Project/westlake/hpdex/build_test_cpp/highway_build/googletest-download/googletest-prefix/src/googletest-stamp/googletest-mkdir	cb0904ecfefa422e
+11	15776	1757920029920556920	googletest-prefix/src/googletest-stamp/googletest-download	2291d063ef5d7e07
+11	15776	1757920029920556920	/Users/wzq/Documents/Code/Project/westlake/hpdex/build_test_cpp/highway_build/googletest-download/googletest-prefix/src/googletest-stamp/googletest-download	2291d063ef5d7e07
+15776	15795	1757920029921052040	googletest-prefix/src/googletest-stamp/googletest-update	771fe6fff4fdd82b
+15776	15795	1757920029921052040	/Users/wzq/Documents/Code/Project/westlake/hpdex/build_test_cpp/highway_build/googletest-download/googletest-prefix/src/googletest-stamp/googletest-update	771fe6fff4fdd82b
+15795	15805	1757920029949352406	googletest-prefix/src/googletest-stamp/googletest-patch	6ced84e04bee2656
+15795	15805	1757920029949352406	/Users/wzq/Documents/Code/Project/westlake/hpdex/build_test_cpp/highway_build/googletest-download/googletest-prefix/src/googletest-stamp/googletest-patch	6ced84e04bee2656
+15805	15815	1757920029959318564	googletest-prefix/src/googletest-stamp/googletest-configure	feab4560631c76c4
+15805	15815	1757920029959318564	/Users/wzq/Documents/Code/Project/westlake/hpdex/build_test_cpp/highway_build/googletest-download/googletest-prefix/src/googletest-stamp/googletest-configure	feab4560631c76c4
+15815	15826	1757920029970416046	googletest-prefix/src/googletest-stamp/googletest-build	44996526e9d177c4
+15815	15826	1757920029970416046	/Users/wzq/Documents/Code/Project/westlake/hpdex/build_test_cpp/highway_build/googletest-download/googletest-prefix/src/googletest-stamp/googletest-build	44996526e9d177c4
+15826	15836	1757920029980417079	googletest-prefix/src/googletest-stamp/googletest-install	b7f2c24683731654
+15826	15836	1757920029980417079	/Users/wzq/Documents/Code/Project/westlake/hpdex/build_test_cpp/highway_build/googletest-download/googletest-prefix/src/googletest-stamp/googletest-install	b7f2c24683731654
+15836	15846	1757920029990367572	googletest-prefix/src/googletest-stamp/googletest-test	1f33cef56ed632ea
+15836	15846	1757920029990367572	/Users/wzq/Documents/Code/Project/westlake/hpdex/build_test_cpp/highway_build/googletest-download/googletest-prefix/src/googletest-stamp/googletest-test	1f33cef56ed632ea
+15846	15862	1757920030006094261	CMakeFiles/googletest-complete	851ee466a84406f0
+15846	15862	1757920030006094261	googletest-prefix/src/googletest-stamp/googletest-done	851ee466a84406f0
+15846	15862	1757920030006094261	/Users/wzq/Documents/Code/Project/westlake/hpdex/build_test_cpp/highway_build/googletest-download/CMakeFiles/googletest-complete	851ee466a84406f0
+15846	15862	1757920030006094261	/Users/wzq/Documents/Code/Project/westlake/hpdex/build_test_cpp/highway_build/googletest-download/googletest-prefix/src/googletest-stamp/googletest-done	851ee466a84406f0

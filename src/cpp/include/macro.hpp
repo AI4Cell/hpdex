@@ -6,9 +6,16 @@
 #define PROJECT_END }
 
 #if USE_OPENMP
+  #include <omp.h>
   #define PARALLEL_REGION(threads) \
-    _Pragma("omp parallel num_threads(threads)")
+    omp_set_num_threads(threads); \
+    _Pragma("omp parallel") {
 
+  #define PARALLEL_END(threads) \
+    } \
+    omp_set_num_threads(threads);
+
+  #define N_THREADS() omp_get_num_threads()
   #define THREAD_ID() omp_get_thread_num()
   #define MAX_THREADS() omp_get_max_threads()
 
@@ -28,12 +35,16 @@
   #define HPDEXC_STRINGIFY(x) HPDEXC_STRINGIFY_IMPL(x)
   #define HPDEXC_STRINGIFY_IMPL(x) #x
 #else
-  #define PARALLEL_REGION(threads)
-  #define PARALLEL_FOR(SCHEDULE, LOOP) { LOOP }
+  #define PARALLEL_REGION(threads) {
+  #define PARALLEL_END(threads) }
+  #define PARALLEL_FOR(SCHEDULE, ARGS, LOOP) { LOOP }
+  #define N_THREADS() 1
   #define THREAD_ID() 0
   #define MAX_THREADS() 1
   #define ATOMIC(DO) { DO }
   #define CRITICAL(DO) { DO }
+  #define HPDEXC_STRINGIFY(x) HPDEXC_STRINGIFY_IMPL(x)
+  #define HPDEXC_STRINGIFY_IMPL(x) #x
 #endif
 
 

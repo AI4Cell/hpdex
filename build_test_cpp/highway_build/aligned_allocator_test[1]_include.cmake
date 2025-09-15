@@ -1,0 +1,5 @@
+if(EXISTS "/Users/wzq/Documents/Code/Project/westlake/hpdex/build_test_cpp/highway_build/aligned_allocator_test[1]_tests.cmake")
+  include("/Users/wzq/Documents/Code/Project/westlake/hpdex/build_test_cpp/highway_build/aligned_allocator_test[1]_tests.cmake")
+else()
+  add_test(aligned_allocator_test_NOT_BUILT aligned_allocator_test_NOT_BUILT)
+endif()

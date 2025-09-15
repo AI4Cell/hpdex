@@ -1,0 +1,5 @@
+if(EXISTS "/Users/wzq/Documents/Code/Project/westlake/hpdex/build_test_cpp/highway_build/dup128_vec_test[1]_tests.cmake")
+  include("/Users/wzq/Documents/Code/Project/westlake/hpdex/build_test_cpp/highway_build/dup128_vec_test[1]_tests.cmake")
+else()
+  add_test(dup128_vec_test_NOT_BUILT dup128_vec_test_NOT_BUILT)
+endif()

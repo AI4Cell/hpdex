@@ -12,6 +12,10 @@ PURPLE := \033[0;35m
 CYAN   := \033[0;36m
 RESET  := \033[0m
 
+# 工具
+CMAKE := cmake
+CM_GENERATOR ?= Ninja
+
 # 基础配置
 PROJECT_NAME := hpdex_cpp
 BUILD_TYPE   ?= Release
@@ -399,3 +403,12 @@ pull:
 	@echo "$(BLUE)[git]$(RESET) 自动pull代码到本地..."
 	@git pull origin $(shell git branch --show-current)
 	@echo "$(GREEN)[完成]$(RESET) 拉取完成"
+
+
+TEST_CPP_BUILD_DIR := build_test_cpp
+.PHONY: test-cpp
+test-cpp:
+	$(CMAKE) -S cpp_test -B $(TEST_CPP_BUILD_DIR) -G "$(CM_GENERATOR)" -DCMAKE_BUILD_TYPE=$(BUILD_TYPE)
+	$(CMAKE) --build $(TEST_CPP_BUILD_DIR) -j $(JOBS)
+	@echo "Running test binary..."
+	$(TEST_CPP_BUILD_DIR)/test_search_clip

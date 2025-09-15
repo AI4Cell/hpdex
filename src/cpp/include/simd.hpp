@@ -4,6 +4,11 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cmath>
+#include <algorithm>
+#include <utility>
+#include <functional>
+#include <limits>
 #include <type_traits>
 #include <cstring>
 
@@ -856,72 +861,67 @@ template<class T>
 force_inline_ std::pair<T, T> array_minmax(const T* const data, const size_t n) {
     if (n == 0) return {T{}, T{}};
 
-    vec<T> min_vec = set1(data[0]);
-    vec<T> max_vec = set1(data[0]);
+    vec<T> min_vec = set1(std::numeric_limits<T>::max());
+    vec<T> max_vec = set1(std::numeric_limits<T>::lowest());
     const size_t step = lanes<T>();
     size_t i = 0;
 
     // 主SIMD循环
     for (; i + step <= n; i += step) {
         const vec<T> v = load(data + i);
-        min_vec = vmin(min_vec, v);
-        max_vec = vmax(max_vec, v);
+        min_vec = vmin<T>(min_vec, v);
+        max_vec = vmax<T>(max_vec, v);
     }
 
-    // 尾部掩码处理
-    if (i < n) {
-        const size_t tail = n - i;
-        const auto m = mask_from_count<T>(tail);
-        const vec<T> v = masked_load(m, data + i);
-        min_vec = vmin(min_vec, v);
-        max_vec = vmax(max_vec, v);
+    T min = reduce_min<T>(min_vec);
+    T max = reduce_max<T>(max_vec);
+
+    // tail
+    if likely_(i < n) {
+        for (size_t j = i; j < n; j++) {
+            min = min < data[j] ? min : data[j];
+            max = max > data[j] ? max : data[j];
+        }
     }
-
-    // 向量归约为标量
-    const T min_val = reduce_min(min_vec);
-    const T max_val = reduce_max(max_vec);
-
-    return {min_val, max_val};
+    return {min, max};
 }
 
 // 单独的最小值版本
 template<class T>
 force_inline_ T array_min(const T* const data, const size_t n) {
     if (n == 0) return T{};
-    vec<T> min_vec = set1(data[0]);
+    vec<T> min_vec = set1(std::numeric_limits<T>::max());
     const size_t step = lanes<T>();
     size_t i = 0;
     for (; i + step <= n; i += step) {
         const vec<T> v = load(data + i);
-        min_vec = vmin(min_vec, v);
+        min_vec = vmin<T>(min_vec, v);
     }
-    if (i < n) {
-        const size_t tail = n - i;
-        const auto m = mask_from_count<T>(tail);
-        const vec<T> v = masked_load(m, data + i);
-        min_vec = vmin(min_vec, v);
+    T min = reduce_min<T>(min_vec);
+    // 手动处理tail
+    for (size_t j = i; j < n; j++) {
+        min = min < data[j] ? min : data[j];
     }
-    return reduce_min(min_vec);
+    return min;
 }
 
 // 单独的最大值版本
 template<class T>
 force_inline_ T array_max(const T* const data, const size_t n) {
     if (n == 0) return T{};
-    vec<T> max_vec = set1(data[0]);
+    vec<T> max_vec = set1(std::numeric_limits<T>::lowest());
     const size_t step = lanes<T>();
     size_t i = 0;
     for (; i + step <= n; i += step) {
         const vec<T> v = load(data + i);
-        max_vec = vmax(max_vec, v);
+        max_vec = vmax<T>(max_vec, v);
     }
-    if (i < n) {
-        const size_t tail = n - i;
-        const auto m = mask_from_count<T>(tail);
-        const vec<T> v = masked_load(m, data + i);
-        max_vec = vmax(max_vec, v);
+    T max = reduce_max<T>(max_vec);
+    // 手动处理tail
+    for (size_t j = i; j < n; j++) {
+        max = max > data[j] ? max : data[j];
     }
-    return reduce_max(max_vec);
+    return max;
 }
 
 // SIMD点积，尾部用掩码处理

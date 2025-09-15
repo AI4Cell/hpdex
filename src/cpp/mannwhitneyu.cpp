@@ -226,13 +226,13 @@ PARALLEL_REGION(threads)
 
     // calculate R_i
     double f_buf[MIN_SEARCH_SIZE];
-    uint32_t R_buf[MIN_SEARCH_SIZE];
+    uint64_t R_buf[MIN_SEARCH_SIZE];
     double* f = f_buf;
-    uint32_t* R = R_buf;
+    uint64_t* R = R_buf;
     const size_t len = end - begin;
     if unlikely_(len > MIN_SEARCH_SIZE) {
         f = new double[len];
-        R = new uint32_t[len];
+        R = new uint64_t[len];
     }
     const size_t step = simd::lanes<double>();
     size_t i = 0;
@@ -250,8 +250,8 @@ PARALLEL_REGION(threads)
         const auto prefix_sum_v = simd::load<double>(prefix_sum + begin + i);
         const auto f_v = simd::div<double>(prefix_sum_v, R_v);
         simd::store<double>(f_v, f + i);
-        const auto R_v_u = simd::convert<uint32_t, double>(R_v);
-        simd::store<uint32_t>(R_v_u, R + i);
+        const auto R_v_u = simd::convert<uint64_t, double>(R_v);
+        simd::store<uint64_t>(R_v_u, R + i);
     }
     const size_t tail = len - i;
     if (tail > 0) {
@@ -263,8 +263,8 @@ PARALLEL_REGION(threads)
         const auto prefix_sum_v = simd::load<double>(prefix_sum + begin + i);
         const auto f_v = simd::div<double>(prefix_sum_v, R_v);
         simd::store<double>(f_v, f + i);
-        const auto R_v_u = simd::convert<uint32_t, double>(R_v);
-        simd::store<uint32_t>(R_v_u, R + i);
+        const auto R_v_u = simd::convert<uint64_t, double>(R_v);
+        simd::store<uint64_t>(R_v_u, R + i);
     }
 
     // find best clip

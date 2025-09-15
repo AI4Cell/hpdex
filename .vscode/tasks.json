@@ -1,0 +1,36 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Configure (cpp_test)",
+      "type": "shell",
+      "command": "cmake",
+      "args": [
+        "..",
+        "-DCMAKE_BUILD_TYPE=Debug"
+      ],
+      "options": {
+        "cwd": "/Users/wzq/Documents/Code/Project/westlake/hpdex/cpp_test/build"
+      }
+    },
+    {
+      "label": "Build test (cpp_test)",
+      "type": "shell",
+      "command": "cmake",
+      "args": [
+        "--build",
+        "/Users/wzq/Documents/Code/Project/westlake/hpdex/cpp_test/build",
+        "-j"
+      ],
+      "options": {
+        "cwd": "/Users/wzq/Documents/Code/Project/westlake/hpdex/cpp_test/build"
+      },
+      "dependsOn": ["Configure (cpp_test)"],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": ["$gcc"]
+    }
+  ]
+}

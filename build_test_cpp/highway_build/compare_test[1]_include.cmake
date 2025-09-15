@@ -1,0 +1,5 @@
+if(EXISTS "/Users/wzq/Documents/Code/Project/westlake/hpdex/build_test_cpp/highway_build/compare_test[1]_tests.cmake")
+  include("/Users/wzq/Documents/Code/Project/westlake/hpdex/build_test_cpp/highway_build/compare_test[1]_tests.cmake")
+else()
+  add_test(compare_test_NOT_BUILT compare_test_NOT_BUILT)
+endif()
