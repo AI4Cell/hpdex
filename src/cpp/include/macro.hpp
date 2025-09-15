@@ -91,3 +91,10 @@
 #else
   #define export_ __attribute__((visibility("default")))
 #endif
+
+// alignas
+#if defined(_MSC_VER)
+  #define alignas_(N) __declspec(align((N)))
+#else
+  #define alignas_(N) alignas((N))
+#endif

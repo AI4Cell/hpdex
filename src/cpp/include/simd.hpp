@@ -829,9 +829,9 @@ force_inline_ bool is_zero(const vec<T>& v) {
 
 // Sum all elements in array using SIMD
 template<class T>
-force_inline_ T array_sum(const T* data, size_t n) {
+force_inline_ T array_sum(const T* const data, const size_t n) {
     vec<T> sum_vec = zero<T>();
-    size_t step = lanes<T>();
+    const size_t step = lanes<T>();
     size_t i = 0;
     
     // Main SIMD loop
@@ -841,47 +841,87 @@ force_inline_ T array_sum(const T* data, size_t n) {
 
     // 尾部掩码处理
     if (i < n) {
-        size_t tail = n - i;
-        auto m = mask_from_count<T>(tail);
+        const size_t tail = n - i;
+        const auto m = mask_from_count<T>(tail);
         sum_vec = add(sum_vec, masked_load(m, data + i));
     }
 
     // 向量归约为标量
-    T sum = reduce_sum(sum_vec);
+    const T sum = reduce_sum(sum_vec);
     return sum;
 }
 
 // Find min/max in array using SIMD
 template<class T>
-force_inline_ std::pair<T, T> array_minmax(const T* data, size_t n) {
+force_inline_ std::pair<T, T> array_minmax(const T* const data, const size_t n) {
     if (n == 0) return {T{}, T{}};
 
     vec<T> min_vec = set1(data[0]);
     vec<T> max_vec = set1(data[0]);
-    size_t step = lanes<T>();
+    const size_t step = lanes<T>();
     size_t i = 0;
 
     // 主SIMD循环
     for (; i + step <= n; i += step) {
-        vec<T> v = load(data + i);
+        const vec<T> v = load(data + i);
         min_vec = vmin(min_vec, v);
         max_vec = vmax(max_vec, v);
     }
 
     // 尾部掩码处理
     if (i < n) {
-        size_t tail = n - i;
-        auto m = mask_from_count<T>(tail);
-        vec<T> v = masked_load(m, data + i);
+        const size_t tail = n - i;
+        const auto m = mask_from_count<T>(tail);
+        const vec<T> v = masked_load(m, data + i);
         min_vec = vmin(min_vec, v);
         max_vec = vmax(max_vec, v);
     }
 
     // 向量归约为标量
-    T min_val = reduce_min(min_vec);
-    T max_val = reduce_max(max_vec);
+    const T min_val = reduce_min(min_vec);
+    const T max_val = reduce_max(max_vec);
 
     return {min_val, max_val};
+}
+
+// 单独的最小值版本
+template<class T>
+force_inline_ T array_min(const T* const data, const size_t n) {
+    if (n == 0) return T{};
+    vec<T> min_vec = set1(data[0]);
+    const size_t step = lanes<T>();
+    size_t i = 0;
+    for (; i + step <= n; i += step) {
+        const vec<T> v = load(data + i);
+        min_vec = vmin(min_vec, v);
+    }
+    if (i < n) {
+        const size_t tail = n - i;
+        const auto m = mask_from_count<T>(tail);
+        const vec<T> v = masked_load(m, data + i);
+        min_vec = vmin(min_vec, v);
+    }
+    return reduce_min(min_vec);
+}
+
+// 单独的最大值版本
+template<class T>
+force_inline_ T array_max(const T* const data, const size_t n) {
+    if (n == 0) return T{};
+    vec<T> max_vec = set1(data[0]);
+    const size_t step = lanes<T>();
+    size_t i = 0;
+    for (; i + step <= n; i += step) {
+        const vec<T> v = load(data + i);
+        max_vec = vmax(max_vec, v);
+    }
+    if (i < n) {
+        const size_t tail = n - i;
+        const auto m = mask_from_count<T>(tail);
+        const vec<T> v = masked_load(m, data + i);
+        max_vec = vmax(max_vec, v);
+    }
+    return reduce_max(max_vec);
 }
 
 // SIMD点积，尾部用掩码处理
