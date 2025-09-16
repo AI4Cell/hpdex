@@ -8,6 +8,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstddef>
+#include <string>
 
 namespace hpdex {
 
