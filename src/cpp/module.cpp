@@ -70,8 +70,8 @@ py::tuple call_mwu_numpy(
         progress_ptr = tracker->ptr();
 
         // 计算各阶段的总量
-        const size_t u_tie_total = C;
-        const size_t p_total = C * n_targets;
+        const size_t u_tie_total = C * n_targets;  // 每个(列,目标组)更新一次
+        const size_t p_total = C * n_targets;      // 每个P值计算更新一次
         std::string u_tie_name("Calc U&tie");
         if (!opt.tie_correction && opt.method == MannWhitneyuOption::exact) {
             u_tie_name = std::string("Calc U");

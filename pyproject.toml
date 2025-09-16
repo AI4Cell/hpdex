@@ -17,15 +17,13 @@ license = {text = "MIT"}
 authors = [{name = "Your Name", email = "you@example.com"}]
 keywords = ["single-cell", "differential expression", "pybind11", "parallel", "C++"]
 
-# 运行时依赖（按你之前的）
 dependencies = [
   "numpy",
   "scipy",
   "numba",
   "pandas",
   "anndata",
-  "tqdm",
-  "pybind11>=3.0.1",
+  "tqdm"
 ]
 
 [project.optional-dependencies]
@@ -45,3 +43,9 @@ minimum-version = "0.9"
 # 把 src/hpdex 复制进 wheel（纯 Python 文件、.pyi、__init__.py 等）
 packages = ["src/hpdex"]
 
+
+[tool.cibuildwheel]
+build = "cp310-* cp311-* cp312-* cp313-*"
+skip = ["pp*", "*-musllinux*"]
+test-requires = ["pytest"]
+test-command = "pytest -q {project}/tests"

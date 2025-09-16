@@ -67,8 +67,10 @@ public:
                 while (current >= prefix_totals_[current_stage_] &&
                        current_stage_ + 1 < stages_.size()) {
                     ++current_stage_;
-                    init_progress_bar(stages_[current_stage_].first,
-                                      stages_[current_stage_].second);
+                    if (current_stage_ < stages_.size()) {
+                        init_progress_bar(stages_[current_stage_].first,
+                                          stages_[current_stage_].second);
+                    }
                 }
 
                 // 当前 stage 的进度 = total_done - 前缀

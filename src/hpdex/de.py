@@ -43,6 +43,7 @@ def parallel_differential_expression(
     min_samples: int = 2,
     threads: int = -1,
     clip_value: float = 20.0,
+    show_progress: bool = True,
 ) -> pd.DataFrame:
     """Parallel differential expression analysis with Mann-Whitney U."""
 
@@ -152,7 +153,7 @@ def parallel_differential_expression(
         tie_correction=tie_correction,
         zero_handling="min",
         threads=threads,
-        show_progress=True,
+        show_progress=show_progress,
     )
     U1 = np.asarray(U1).reshape(-1)
     P = np.asarray(P).reshape(-1)
