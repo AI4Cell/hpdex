@@ -72,13 +72,14 @@ py::tuple call_mwu_numpy(
         // 计算各阶段的总量
         const size_t u_tie_total = C;
         const size_t p_total = C * n_targets;
-        std::string u_tie_name = "Calc U&tie";
+        std::string u_tie_name("Calc U&tie");
         if (!opt.tie_correction && opt.method == MannWhitneyuOption::exact) {
-            u_tie_name = "Calc U";
+            u_tie_name = std::string("Calc U");
         }
+        std::string p_name("Calc P");
         std::vector<ProgressBar::Stage> stages = {
-            {"Calc U&tie", u_tie_total},
-            {"Calc P", p_total}
+            {u_tie_name, u_tie_total},
+            {p_name, p_total}
         };
 
         progress_bar = std::make_unique<ProgressBar>(stages, *tracker, 100);
