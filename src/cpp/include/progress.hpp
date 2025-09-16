@@ -96,7 +96,7 @@ public:
               bool use_unicode = true)
         : total_(std::max<size_t>(1, total)),
           desc_(desc),
-          width_(width == 0 ? calculate_bar_width(desc, unit) : std::max<size_t>(1, width)),
+          width_(width == 0 ? std::max<size_t>(10, calculate_bar_width(desc, unit) - 10) : std::max<size_t>(1, width)),
           unit_(unit),
           use_unicode_(use_unicode),
           start_time_(std::chrono::steady_clock::now()) {}
