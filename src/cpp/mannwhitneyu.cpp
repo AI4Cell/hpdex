@@ -7,6 +7,7 @@
 #include "sparse.hpp"
 #include <atomic>
 #include <cmath>
+#include <cstddef>
 
 namespace hpdex {
 
@@ -192,11 +193,9 @@ force_inline_ void p_asymptotic_parallel(
     double* out, size_t N,
     MannWhitneyuOption::Alternative alt,
     bool fast_norm,
-    int threads
+    int threads,
+    size_t* progress_ptr
 ) {
-    const int maxth = omp_get_max_threads();
-    if (threads < 0) threads = maxth;
-    if (threads > maxth) threads = maxth;
 
     using AsympFn = void(*)(const double*, const double*, const double*, const double*, const double*, double*, size_t);
 
@@ -223,7 +222,11 @@ force_inline_ void p_asymptotic_parallel(
         const int tid = omp_get_thread_num();
         const int nth = omp_get_num_threads();
 
-        const size_t chunk = (N + nth - 1) / nth;
+        constexpr size_t align = 8;  
+
+        const size_t base = (N + nth - 1) / nth;  
+
+        const size_t chunk = ((base + align - 1) / align) * align;
         const size_t begin = tid * chunk;
         const size_t end   = std::min(N, begin + chunk);
         
@@ -231,6 +234,7 @@ force_inline_ void p_asymptotic_parallel(
             fn(U1 + begin, n1 + begin, n2 + begin, tie_sum + begin, cc + begin,
                out + begin, end - begin);
         }
+        progress_ptr[tid]++;
     }
 }
 
@@ -242,11 +246,9 @@ force_inline_ void p_exact_parallel(
     double*       out,         // len = N
     size_t        N,
     MannWhitneyuOption::Alternative alt,
-    int           threads
+    int           threads,
+    size_t*       progress_ptr
 ) {
-    int maxth = omp_get_max_threads();
-    if (threads < 0) threads = maxth;
-    if (threads > maxth) threads = maxth;
 
     #pragma omp parallel for schedule(dynamic) num_threads(threads)
     for (std::ptrdiff_t i = 0; i < (std::ptrdiff_t)N; ++i) {
@@ -274,6 +276,7 @@ force_inline_ void p_exact_parallel(
         if (p < 0.0) p = 0.0;
         if (p > 1.0) p = 1.0;
         out[i] = p;
+        progress_ptr[omp_get_thread_num()]++;
     }
 }
 
@@ -842,7 +845,8 @@ mannWhitneyu_core(
     const T* data, const int64_t* indices, const int64_t* indptr,
     const size_t& R, const size_t& C, const size_t& nnz,
     const int32_t* group_id, size_t n_targets,
-    const MannWhitneyuOption& opt, int threads
+    const MannWhitneyuOption& opt, int threads,
+    size_t* progress_ptr
 ){
     if (n_targets == 0) return { {}, {} };
 
@@ -862,9 +866,6 @@ mannWhitneyu_core(
         int g = group_id[r];
         if (g >= 0 && size_t(g) < G) ++group_rows[size_t(g)];
     }
-
-    if (threads < 0) threads = omp_get_max_threads();
-    if (threads > omp_get_max_threads()) threads = omp_get_max_threads();
 
     // 错误标记
     std::atomic<bool> has_error{false};
@@ -888,6 +889,7 @@ mannWhitneyu_core(
         for (std::ptrdiff_t cc = 0; cc < (std::ptrdiff_t)C; ++cc) {
             const size_t c = (size_t)cc;
             body(c);
+            progress_ptr[omp_get_thread_num()]++;
         }
     };
 
@@ -1058,13 +1060,15 @@ mannWhitneyu_core(
             P_out.data(), Npairs,
             opt.alternative,
             opt.fast_norm,
-            threads
+            threads,
+            progress_ptr
         );
     } else {
         p_exact_parallel(
             U1_out.data(), n1_arr.data(), n2_arr.data(),
             P_out.data(), Npairs,
-            opt.alternative, threads
+            opt.alternative, threads,
+            progress_ptr
         );
     }
 
@@ -1077,9 +1081,13 @@ MWUResult mannwhitneyu(
     const int32_t* group_id,   // group_id 指针
     const size_t&  n_targets,   // 目标组的数量（值域大小）
     const MannWhitneyuOption& option,
-    const int      threads,
-    size_t*        /*progress_ptr*/
+    int            threads,
+    size_t*        progress_ptr
 ) {
+    threads = threads < 0 ? omp_get_max_threads(): threads > omp_get_max_threads() ? omp_get_max_threads() : threads;
+    bool has_progress_ptr = progress_ptr != nullptr;
+    progress_ptr = has_progress_ptr ? progress_ptr : new size_t[threads];
+
     // ===== 取出三元数组 =====
     const T* data = A.data();
     const int64_t* indices = A.indices();
@@ -1098,12 +1106,15 @@ MWUResult mannwhitneyu(
         indices,
         indptr,
         R, C, nnz,
-        group_id,      // 直接传指针
+        group_id,
         n_targets,
         option,
-        threads
+        threads,
+        progress_ptr
     );
 
+    if (!has_progress_ptr) delete[] progress_ptr;
+    
     MWUResult result;
     result.U1 = std::move(ret.first);
     result.P  = std::move(ret.second);
@@ -1115,9 +1126,6 @@ MWUResult mannwhitneyu(
 // include_zeros=true 时：分母 = group_rows[g] - invalid_cnt[g]
 // （隐式0计入；显式无效值剔除）；false 时：分母 = valid_cnt[g]（仅显式有效计数）。
 // 显式无效值(!is_valid_value)不计入分子/分母。
-
-#include <algorithm> // std::fill
-
 template<class T>
 static force_inline_ std::vector<double>
 group_mean_core(

@@ -10,9 +10,8 @@
   DO(uint16_t) \
   DO(uint32_t) \
   DO(uint64_t) \
-  DO(float16_t) \
-  DO(float32_t) \
-  DO(float64_t)
+  DO(float) \
+  DO(double)
 
 // ============================================
 // tools

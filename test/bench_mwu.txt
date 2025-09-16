@@ -1,0 +1,12 @@
+--R 5000
+--C 200
+--n_targets 10
+--repeats 3
+--use_continuity
+--value_range 0 5000
+--density 0.2
+--threads 1000
+--alternative two-sided
+--method asymptotic
+--zero_handling min
+--check

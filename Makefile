@@ -143,8 +143,7 @@ rebuild: clean build
 .PHONY: install
 install: build
 	@echo "$(BLUE)[安装]$(RESET) 安装到 Python 环境..."
-	@cd $(BUILD_DIR) && cmake --install . --config $(BUILD_TYPE)
-	@echo "$(GREEN)[完成]$(RESET) 安装成功"
+	uv pip install . --verbose
 
 # ==============================================
 # 构建变体

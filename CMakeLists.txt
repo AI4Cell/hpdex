@@ -12,6 +12,8 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
 
+# 创建 compile_commands.json 符号链接的自定义目标将在 kernel 目标定义后添加
+
 # -----------------------------
 # Python & pybind11
 # -----------------------------
@@ -40,6 +42,34 @@ set(HWY_ENABLE_EXAMPLES OFF CACHE BOOL "" FORCE)
 add_subdirectory("${HIGHWAY_DIR}" highway_build EXCLUDE_FROM_ALL)
 
 # -----------------------------
+# Indicators（FetchContent 自动下载）
+# -----------------------------
+include(FetchContent)
+FetchContent_Declare(
+  indicators
+  GIT_REPOSITORY https://github.com/p-ranav/indicators.git
+  GIT_TAG        v2.3
+  GIT_SHALLOW    TRUE
+)
+
+# 设置 indicators 编译选项
+set(INDICATORS_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(INDICATORS_SAMPLES OFF CACHE BOOL "" FORCE)
+
+FetchContent_MakeAvailable(indicators)
+
+# 确保 indicators 头文件可用
+if(TARGET indicators::indicators)
+  set(INDICATORS_TARGET indicators::indicators)
+else()
+  # 如果没有导入目标，创建一个接口目标
+  add_library(indicators_interface INTERFACE)
+  target_include_directories(indicators_interface INTERFACE 
+    ${indicators_SOURCE_DIR}/include)
+  set(INDICATORS_TARGET indicators_interface)
+endif()
+
+# -----------------------------
 # OpenMP（可选；跨平台处理）
 # -----------------------------
 find_package(OpenMP QUIET)
@@ -50,9 +80,30 @@ if(APPLE AND NOT OpenMP_CXX_FOUND)
     if(EXISTS "${_omp_root}/lib/libomp.dylib")
       message(STATUS "Using fallback libomp at ${_omp_root}")
       add_library(OpenMP::OpenMP_CXX SHARED IMPORTED)
+      
+      # 检查编译器是否支持-fopenmp标志
+      include(CheckCXXCompilerFlag)
+      check_cxx_compiler_flag("-fopenmp" COMPILER_SUPPORTS_FOPENMP)
+      check_cxx_compiler_flag("-Xpreprocessor -fopenmp" COMPILER_SUPPORTS_XPREPROCESSOR_FOPENMP)
+      
+      if(COMPILER_SUPPORTS_FOPENMP)
+        set(_omp_compile_flags "-fopenmp")
+        set(_omp_link_flags "-fopenmp")
+      elseif(COMPILER_SUPPORTS_XPREPROCESSOR_FOPENMP)
+        set(_omp_compile_flags "-Xpreprocessor;-fopenmp")
+        set(_omp_link_flags "-lomp")
+      else()
+        # 如果编译器不支持OpenMP，则只设置头文件路径和库
+        message(WARNING "Compiler does not support OpenMP flags, using library-only approach")
+        set(_omp_compile_flags "")
+        set(_omp_link_flags "")
+      endif()
+      
       set_target_properties(OpenMP::OpenMP_CXX PROPERTIES
         IMPORTED_LOCATION "${_omp_root}/lib/libomp.dylib"
         INTERFACE_INCLUDE_DIRECTORIES "${_omp_root}/include"
+        INTERFACE_COMPILE_OPTIONS "${_omp_compile_flags}"
+        INTERFACE_LINK_OPTIONS "${_omp_link_flags}"
       )
       set(OpenMP_CXX_FOUND TRUE)
       set(_OMP_RPATH "${_omp_root}/lib")
@@ -83,14 +134,36 @@ else()
   endif()
 endif()
 
+# 添加 include 目录
 target_include_directories(kernel PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/src/cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/cpp/include
+  src/cpp/include
 )
 
-target_link_libraries(kernel PRIVATE hwy hwy_contrib)
+target_link_libraries(kernel PRIVATE hwy hwy_contrib ${INDICATORS_TARGET})
+
+# 平台特定的OpenMP处理
 if(OpenMP_CXX_FOUND)
   target_link_libraries(kernel PRIVATE OpenMP::OpenMP_CXX)
+  
+  # 根据平台选择正确的编译标志
+  if(APPLE)
+    # macOS: 不手动添加编译标志，OpenMP::OpenMP_CXX目标会自动处理
+    target_compile_definitions(kernel PRIVATE _OPENMP)
+    message(STATUS "OpenMP enabled for macOS")
+  elseif(WIN32)
+    # Windows: MSVC的OpenMP支持
+    target_compile_definitions(kernel PRIVATE _OPENMP)
+    message(STATUS "OpenMP enabled for Windows")
+  else()
+    # Linux: GCC的OpenMP支持
+    target_compile_definitions(kernel PRIVATE _OPENMP)
+    message(STATUS "OpenMP enabled for Linux")
+  endif()
+else()
+  message(WARNING "OpenMP not found, parallel execution will be disabled")
+  target_compile_definitions(kernel PRIVATE NO_OPENMP)
 endif()
 
 # macOS: 避免链接期强解析 Python 符号；并给 libomp 设 rpath
@@ -100,6 +173,23 @@ if(APPLE)
     set_target_properties(kernel PROPERTIES
       BUILD_RPATH "${_OMP_RPATH}"
       INSTALL_RPATH "${_OMP_RPATH}"
+    )
+  endif()
+endif()
+
+# -----------------------------
+# 创建 compile_commands.json 符号链接
+# -----------------------------
+if(CMAKE_GENERATOR STREQUAL "Unix Makefiles" OR CMAKE_GENERATOR STREQUAL "Ninja")
+  if(CMAKE_BINARY_DIR STREQUAL "${CMAKE_SOURCE_DIR}/build")
+    set(_compile_commands_src "${CMAKE_BINARY_DIR}/compile_commands.json")
+    set(_compile_commands_dst "${CMAKE_SOURCE_DIR}/compile_commands.json")
+    add_custom_command(
+      TARGET kernel POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E create_symlink
+              "${_compile_commands_src}" "${_compile_commands_dst}"
+      COMMENT "在项目根目录创建 compile_commands.json 的符号链接"
+      VERBATIM
     )
   endif()
 endif()

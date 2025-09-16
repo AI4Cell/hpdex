@@ -1,0 +1,131 @@
+#include <cstddef>
+#include <vector>
+#include <string>
+#include <iostream>
+#include <thread>
+#include <atomic>
+#include <chrono>
+#include <memory>
+#include <indicators/block_progress_bar.hpp>
+
+class ProgressTracker {
+public:
+    ProgressTracker(size_t nthreads)
+        : nthreads_(nthreads), progress_(nthreads, 0) {
+        raw_ptr_ = progress_.data();
+    }
+
+    size_t* ptr() { return raw_ptr_; }
+
+    size_t aggregate() const {
+        size_t sum = 0;
+        for (size_t i = 0; i < nthreads_; ++i) {
+            sum += progress_[i];
+        }
+        return sum;
+    }
+
+    size_t nthreads() const { return nthreads_; }
+
+private:
+    size_t nthreads_;
+    std::vector<size_t> progress_;
+    size_t* raw_ptr_;  // 非原子，不加锁，由外部控制
+};
+
+class ProgressBar {
+public:
+    using Stage = std::pair<std::string, size_t>;
+
+    ProgressBar(const std::vector<Stage>& stages,
+                const ProgressTracker& tracker,
+                int interval_ms = 200)
+        : stages_(stages), tracker_(tracker), interval_(interval_ms), running_(false) 
+    {
+        if (stages_.empty()) throw std::runtime_error("No stages provided");
+
+        // 计算 prefix sum，用于判断阶段切换
+        prefix_totals_.resize(stages_.size());
+        size_t acc = 0;
+        for (size_t i = 0; i < stages_.size(); ++i) {
+            acc += stages_[i].second;
+            prefix_totals_[i] = acc;
+        }
+
+        current_stage_ = 0;
+        init_progress_bar(stages_[0].first, stages_[0].second);
+    }
+
+    void start() {
+        if (running_) return;
+        running_ = true;
+        worker_ = std::thread([this]() {
+            while (running_) {
+                size_t current = tracker_.aggregate();
+
+                // 检查是否需要切换 stage
+                while (current >= prefix_totals_[current_stage_] &&
+                       current_stage_ + 1 < stages_.size()) {
+                    ++current_stage_;
+                    init_progress_bar(stages_[current_stage_].first,
+                                      stages_[current_stage_].second);
+                }
+
+                // 当前 stage 的进度 = total_done - 前缀
+                size_t stage_base = (current_stage_ == 0) ? 0 : prefix_totals_[current_stage_ - 1];
+                size_t stage_progress = current - stage_base;
+                size_t stage_total = stages_[current_stage_].second;
+
+                progress_bar_->set_progress(std::min(stage_progress, stage_total));
+
+                if (current >= prefix_totals_.back()) break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(interval_));
+            }
+
+            // 确保完成
+            progress_bar_->set_progress(stages_[current_stage_].second);
+        });
+    }
+
+    void stop() {
+        running_ = false;
+        if (worker_.joinable()) worker_.join();
+        std::cout << std::endl;
+    }
+
+    ~ProgressBar() {
+        stop();
+    }
+
+private:
+    void init_progress_bar(const std::string& name, size_t total) {
+        // 如果之前有一个进度条，确保它收尾并换行
+        if (progress_bar_ && !progress_bar_->is_completed()) {
+            progress_bar_->mark_as_completed();
+            std::cout << std::endl;
+        }
+
+        // 创建新的进度条
+        progress_bar_ = std::make_unique<indicators::BlockProgressBar>(
+            indicators::option::BarWidth{50},
+            indicators::option::Start{"["},
+            indicators::option::End{"]"},
+            indicators::option::PrefixText{name + ": "},
+            indicators::option::ShowPercentage{true},
+            indicators::option::ShowElapsedTime{true},
+            indicators::option::ShowRemainingTime{true},
+            indicators::option::MaxProgress{total},
+            indicators::option::Stream{std::cout},
+            indicators::option::ForegroundColor{indicators::Color::white}
+        );
+    }
+
+    std::vector<Stage> stages_;
+    std::vector<size_t> prefix_totals_;
+    size_t current_stage_;
+    const ProgressTracker& tracker_;
+    int interval_;
+    std::atomic<bool> running_;
+    std::thread worker_;
+    std::unique_ptr<indicators::BlockProgressBar> progress_bar_;
+};

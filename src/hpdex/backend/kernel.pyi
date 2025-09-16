@@ -9,6 +9,7 @@ Backend: implemented in C++ with OpenMP + SIMD (Highway), exposed via pybind11.
 """
 
 from typing import Literal, Tuple
+
 import numpy as np
 
 __all__ = ["mannwhitneyu", "group_mean"]
@@ -29,6 +30,7 @@ def mannwhitneyu(
     method: Literal[1, 2] = 2,
     threads: int = -1,
     layout: Literal["csc", "csr"] = "csc",
+    show_progress: bool = False,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Perform Mann-Whitney U test for sparse matrix columns grouped by `group_id`.
@@ -66,6 +68,8 @@ def mannwhitneyu(
         Number of threads (-1 = use all available).
     layout : {"csc", "csr"}
         Input sparse layout.
+    show_progress : bool
+        Show progress bar.
 
     Returns
     -------

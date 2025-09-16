@@ -24,7 +24,8 @@ dependencies = [
   "numba",
   "pandas",
   "anndata",
-  "tqdm"
+  "tqdm",
+  "pybind11>=3.0.1",
 ]
 
 [project.optional-dependencies]

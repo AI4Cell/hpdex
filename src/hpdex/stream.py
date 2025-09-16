@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Streaming backend for hpdex to handle extremely large datasets (100GB+).
 
@@ -18,9 +17,9 @@ from tqdm import tqdm
 
 # Import core functions from main backend
 from .backend.de_ import (_auto_schedule_chunk_size, _compute_fdr,
-                     _compute_fold_changes, _compute_log2_fold_change,
-                     _execute_multiprocess_computation,
-                     _execute_singlethread_computation)
+                          _compute_fold_changes, _compute_log2_fold_change,
+                          _execute_multiprocess_computation,
+                          _execute_singlethread_computation)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

@@ -1,7 +1,9 @@
-from .bin import kernel
-import scipy.sparse
-import numpy as np
 from typing import Literal
+
+import numpy as np
+import scipy.sparse
+
+from .bin import kernel
 
 __all__ = ["mannwhitneyu", "group_mean"]
 
@@ -15,7 +17,7 @@ _zero_handling_map = {
 _alternative_map = {
     "less": 0,
     "greater": 1,
-    "two_sided": 2,
+    "two-sided": 2,
 }
 _method_map = {
     "exact": 1,
@@ -31,27 +33,33 @@ def mannwhitneyu(
     tar_sorted: bool = False,
     tie_correction: bool = True,
     use_continuity: bool = False,
-    fast_norm: bool = True,
+    fast_norm: bool = False,
     zero_handling: Literal["none", "min", "max", "mix"] = "mix",
-    alternative: Literal["less", "greater", "two_sided"] = "two_sided",
+    alternative: Literal["less", "greater", "twosided"] = "two-sided",
     method: Literal["exact", "asymptotic"] = "asymptotic",
     threads: int = -1,
+    show_progress: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Mann-Whitney U test on sparse CSR/CSC matrix (multi-group)."""
     if not isinstance(sparse_matrix, (scipy.sparse.csr_matrix, scipy.sparse.csc_matrix)):
         raise ValueError("sparse_matrix must be CSR or CSC")
 
-    indptr = sparse_matrix.indptr
-    if group_id.ndim != 1 or len(group_id) != len(indptr) - 1:
+    # For CSC: group_id corresponds to rows; For CSR: group_id corresponds to columns
+    if isinstance(sparse_matrix, scipy.sparse.csc_matrix):
+        R = sparse_matrix.shape[0]  # number of rows (samples)
+    else:  # CSR
+        R = sparse_matrix.shape[1]  # number of columns (samples)
+    
+    if group_id.ndim != 1 or len(group_id) != R:
         raise ValueError(
-            f"group_id must be 1D with length {len(indptr) - 1} (rows of CSC / cols of CSR)"
+            f"group_id must be 1D with length {R} (rows of CSC / cols of CSR)"
         )
 
     # prepare arrays
     group_id = group_id.astype(np.int32, copy=False)
     data = sparse_matrix.data
     indices = sparse_matrix.indices.astype(np.int64, copy=False)
-    indptr = indptr.astype(np.int64, copy=False)
+    indptr = sparse_matrix.indptr.astype(np.int64, copy=False)
 
     # map parameters
     zero_handling = _zero_handling_map[zero_handling]
@@ -74,6 +82,7 @@ def mannwhitneyu(
         method=method,
         threads=threads,
         layout="csc" if isinstance(sparse_matrix, scipy.sparse.csc_matrix) else "csr",
+        show_progress=show_progress,
     )
 
 # ---------------- 封装：GroupMean ----------------
@@ -88,16 +97,21 @@ def group_mean(
     if not isinstance(sparse_matrix, (scipy.sparse.csr_matrix, scipy.sparse.csc_matrix)):
         raise ValueError("sparse_matrix must be CSR or CSC")
 
-    indptr = sparse_matrix.indptr
-    if group_id.ndim != 1 or len(group_id) != len(indptr) - 1:
+    # For CSC: group_id corresponds to rows; For CSR: group_id corresponds to columns
+    if isinstance(sparse_matrix, scipy.sparse.csc_matrix):
+        R = sparse_matrix.shape[0]  # number of rows (samples)
+    else:  # CSR
+        R = sparse_matrix.shape[1]  # number of columns (samples)
+    
+    if group_id.ndim != 1 or len(group_id) != R:
         raise ValueError(
-            f"group_id must be 1D with length {len(indptr) - 1} (rows of CSC / cols of CSR)"
+            f"group_id must be 1D with length {R} (rows of CSC / cols of CSR)"
         )
 
     group_id = group_id.astype(np.int32, copy=False)
     data = sparse_matrix.data
     indices = sparse_matrix.indices.astype(np.int64, copy=False)
-    indptr = indptr.astype(np.int64, copy=False)
+    indptr = sparse_matrix.indptr.astype(np.int64, copy=False)
 
     return kernel.group_mean(
         data=data,

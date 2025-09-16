@@ -16,6 +16,7 @@ Key Features:
 
 import logging
 import multiprocessing as mp
+import multiprocessing.shared_memory as shm
 from typing import List, Optional, Tuple
 
 import anndata as ad
@@ -23,7 +24,6 @@ import numpy as np
 import pandas as pd
 from scipy.stats import false_discovery_control
 from tqdm import tqdm
-import multiprocessing.shared_memory as shm
 
 from .pykernel_ import rank_sum_chunk_kernel_float, rank_sum_chunk_kernel_hist
 
