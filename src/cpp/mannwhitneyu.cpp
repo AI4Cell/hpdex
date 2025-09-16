@@ -885,7 +885,7 @@ mannWhitneyu_core(
     const double tie_mask = opt.tie_correction ? 1.0 : 0.0;
 
     // ---- 一个小工具：并行跑指定列处理体
-    auto run_cols = [&](auto&& body) {
+    auto run_cols = [&, threads](auto&& body) {
         #pragma omp parallel for schedule(static) num_threads(threads)
         for (std::ptrdiff_t cc = 0; cc < (std::ptrdiff_t)C; ++cc) {
             const size_t c = (size_t)cc;
