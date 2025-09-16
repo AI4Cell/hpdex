@@ -90,7 +90,6 @@ test/test_data/
 test/test_results/
 
 # 依赖库
-Lib/
 *.tar.gz
 *.zip
 *.whl
