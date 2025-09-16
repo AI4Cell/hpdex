@@ -100,6 +100,7 @@ def parallel_differential_expression(
     n_targets = len(groups)
 
     # ===== Step 3: matrix preparation =====
+    logger.info("⚙️ Converting to CSC matrix...")
     if isinstance(adata.X, np.ndarray):
         matrix = scipy.sparse.csc_matrix(adata.X)
     elif isinstance(adata.X, scipy.sparse.csr_matrix):
