@@ -69,8 +69,10 @@ py::tuple call_mwu_numpy(
                            (threads > omp_get_max_threads() ? omp_get_max_threads() : threads);
         
         // 计算各阶段的工作量
-        const size_t u_tie_total = C * n_targets;  // U统计量和tie校正计算
-        const size_t p_total = C * n_targets;      // P值计算
+        const size_t u_tie_total = C;  // U统计量计算：每列更新一次进度
+        const size_t p_total = (opt.method == MannWhitneyuOption::exact) 
+                               ? C * n_targets  // exact方法：每个测试对更新一次
+                               : actual_threads; // asymptotic方法：每个线程chunk更新一次
         
         // 创建多阶段进度条
         std::vector<ProgressBar> bars;
