@@ -1,5 +1,6 @@
 #include <cstddef>
 #include <vector>
+#include <string>
 #include <iostream>
 #include <thread>
 #include <atomic>
@@ -34,11 +35,7 @@ private:
 
 class ProgressBar {
 public:
-    struct Stage {
-        const char* name_ptr;  // 裸指针（可能为 nullptr）
-        size_t name_len;       // 名称长度
-        size_t total;          // 总进度
-    };
+    using Stage = std::pair<const char*, size_t>;
 
     ProgressBar(const std::vector<Stage>& stages,
                 const ProgressTracker& tracker,
@@ -47,16 +44,17 @@ public:
     {
         if (stages_.empty()) throw std::runtime_error("No stages provided");
 
-        // 计算 prefix sum
+        // 计算 prefix sum，用于判断阶段切换
         prefix_totals_.resize(stages_.size());
         size_t acc = 0;
         for (size_t i = 0; i < stages_.size(); ++i) {
-            acc += stages_[i].total;
+            acc += stages_[i].second;
             prefix_totals_[i] = acc;
         }
 
         current_stage_ = 0;
-        init_progress_bar(stages_[0]);
+        // 安全地获取第一个stage的名称，确保不为空
+        init_progress_bar(stages_[0].first, stages_[0].second);
     }
 
     void start() {
@@ -70,13 +68,16 @@ public:
                 while (current >= prefix_totals_[current_stage_] &&
                        current_stage_ + 1 < stages_.size()) {
                     ++current_stage_;
-                    init_progress_bar(stages_[current_stage_]);
+                    if (current_stage_ < stages_.size()) {
+                        init_progress_bar(stages_[current_stage_].first,
+                                          stages_[current_stage_].second);
+                    }
                 }
 
-                // 当前 stage 的进度
+                // 当前 stage 的进度 = total_done - 前缀
                 size_t stage_base = (current_stage_ == 0) ? 0 : prefix_totals_[current_stage_ - 1];
                 size_t stage_progress = current - stage_base;
-                size_t stage_total = stages_[current_stage_].total;
+                size_t stage_total = stages_[current_stage_].second;
 
                 progress_bar_->set_progress(std::min(stage_progress, stage_total));
 
@@ -85,7 +86,7 @@ public:
             }
 
             // 确保完成
-            progress_bar_->set_progress(stages_[current_stage_].total);
+            progress_bar_->set_progress(stages_[current_stage_].second);
         });
     }
 
@@ -100,30 +101,27 @@ public:
     }
 
 private:
-    void init_progress_bar(const Stage& stage) {
-        // 先结束旧的
+    void init_progress_bar(const char* name, size_t total) {
+        // 如果之前有一个进度条，确保它收尾并换行
         if (progress_bar_ && !progress_bar_->is_completed()) {
             progress_bar_->mark_as_completed();
             std::cout << std::endl;
         }
 
-        // 安全构造前缀字符串
-        std::string prefix;
-        if (stage.name_ptr && stage.name_len > 0) {
-            prefix.assign(stage.name_ptr, stage.name_len);
-        } else {
-            prefix = "Progress";
-        }
+        // 安全地构造前缀文本，避免空指针/空字符串问题
+        const char* safe_ptr = (name && name[0] != '\0') ? name : "Progress";
+        std::string prefix_text = std::string(safe_ptr) + ": ";
 
+        // 创建新的进度条
         progress_bar_ = std::make_unique<indicators::BlockProgressBar>(
             indicators::option::BarWidth{50},
             indicators::option::Start{"["},
             indicators::option::End{"]"},
-            indicators::option::PrefixText{prefix + ": "},
+            indicators::option::PrefixText{prefix_text},
             indicators::option::ShowPercentage{true},
             indicators::option::ShowElapsedTime{true},
             indicators::option::ShowRemainingTime{true},
-            indicators::option::MaxProgress{stage.total},
+            indicators::option::MaxProgress{total},
             indicators::option::Stream{std::cout},
             indicators::option::ForegroundColor{indicators::Color::white}
         );

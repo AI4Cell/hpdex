@@ -7,7 +7,6 @@
 #include "sparse.hpp"
 #include "mannwhitneyu.hpp"
 #include "progress.hpp"
-#include "cstring"
 
 namespace py = pybind11;
 namespace hpdex {
@@ -80,8 +79,8 @@ py::tuple call_mwu_numpy(
         const char* p_name = "Calc P";
         
         std::vector<ProgressBar::Stage> stages = {
-            {u_tie_name, strlen(u_tie_name), u_tie_total},
-            {p_name, strlen(p_name), p_total}
+            {u_tie_name, u_tie_total},
+            {p_name, p_total}
         };
 
         progress_bar = std::make_unique<ProgressBar>(stages, *tracker, 100);
