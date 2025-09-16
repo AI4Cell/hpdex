@@ -178,6 +178,11 @@ public:
         std::cout << std::endl;
     }
 
+    // 重置开始时间（用于多阶段进度条）
+    inline void reset_start_time() {
+        start_time_ = std::chrono::steady_clock::now();
+    }
+
     inline bool is_completed() const { return completed; }
 
 private:
@@ -252,6 +257,11 @@ public:
         current_stage_ = 0;
         cumulative_total_ = 0;
         
+        // 重置第一个进度条的开始时间
+        if (!bars_.empty()) {
+            bars_[0].reset_start_time();
+        }
+        
         update_thread_ = std::thread([this, time_interval]() {
             while (!stop_flag_ && current_stage_ < bars_.size()) {
                 size_t sum = tracker_.aggregate();
@@ -264,6 +274,11 @@ public:
                     bars_[current_stage_].complete();
                     cumulative_total_ += stage_totals_[current_stage_];
                     current_stage_++;
+                    
+                    // 如果有下一个阶段，重置其开始时间
+                    if (current_stage_ < bars_.size()) {
+                        bars_[current_stage_].reset_start_time();
+                    }
                 }
                 
                 // 更新当前阶段的进度条
