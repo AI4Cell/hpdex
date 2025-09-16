@@ -2,12 +2,96 @@
 // mwu cpu 算子实现
 #include "mannwhitneyu.hpp"
 #include "common.hpp"
-#include "config.hpp"
 #include "macro.hpp"
 #include "simd.hpp"
+#include "sparse.hpp"
 #include <atomic>
+#include <cmath>
 
 namespace hpdex {
+
+// -------- precise normal tail helpers (erfc-based) --------
+#ifndef M_SQRT1_2
+#define M_SQRT1_2 0.7071067811865475244008443621048490392848359376887
+#endif
+
+force_inline_ double norm_sf_precise(double z) {
+    return 0.5 * std::erfc(z * M_SQRT1_2);
+}
+
+force_inline_ void compute_mu_sigma_precise(
+    double n1, double n2, double tie_sum, double& mu, double& sigma
+) {
+    const double N  = n1 + n2;
+    const double nm = n1 * n2;
+    mu = 0.5 * nm;
+
+    double tie_term = 0.0;
+    const double denom = N * (N - 1.0);
+    if (denom > 0.0) tie_term = tie_sum / denom;
+
+    const double var = nm * ((N + 1.0) - tie_term) / 12.0;
+    sigma = (var > 0.0) ? std::sqrt(var) : 0.0;
+}
+
+static inline void array_p_asymptotic_greater_precise(
+    const double* U1, const double* n1, const double* n2,
+    const double* tie_sum, const double* cc,
+    double* out, size_t len
+){
+    for (size_t i = 0; i < len; ++i) {
+        double mu, sigma;
+        compute_mu_sigma_precise(n1[i], n2[i], tie_sum[i], mu, sigma);
+        double p = 1.0;
+        if (sigma > 0.0) {
+            const double z = (U1[i] - mu - cc[i]) / sigma;
+            p = norm_sf_precise(z);
+        }
+        out[i] = (p < 0.0 ? 0.0 : (p > 1.0 ? 1.0 : p));
+    }
+}
+
+static inline void array_p_asymptotic_less_precise(
+    const double* U1, const double* n1, const double* n2,
+    const double* tie_sum, const double* cc,
+    double* out, size_t len
+){
+    for (size_t i = 0; i < len; ++i) {
+        const double nm = n1[i] * n2[i];
+        const double U2 = nm - U1[i];
+        double mu, sigma;
+        compute_mu_sigma_precise(n1[i], n2[i], tie_sum[i], mu, sigma);
+        double p = 1.0;
+        if (sigma > 0.0) {
+            const double z = (U2 - mu - cc[i]) / sigma;
+            p = norm_sf_precise(z);
+        }
+        out[i] = (p < 0.0 ? 0.0 : (p > 1.0 ? 1.0 : p));
+    }
+}
+
+static inline void array_p_asymptotic_two_sided_precise(
+    const double* U1, const double* n1, const double* n2,
+    const double* tie_sum, const double* cc,
+    double* out, size_t len
+){
+    for (size_t i = 0; i < len; ++i) {
+        const double nm  = n1[i] * n2[i];
+        const double U2  = nm - U1[i];
+        const double U   = (U1[i] > U2 ? U1[i] : U2);
+        double mu, sigma;
+        compute_mu_sigma_precise(n1[i], n2[i], tie_sum[i], mu, sigma);
+
+        double p = 1.0;
+        if (sigma > 0.0) {
+            const double z = (U - mu - cc[i]) / sigma;
+            p = 2.0 * norm_sf_precise(z);
+            if (p > 1.0) p = 1.0;
+            if (p < 0.0) p = 0.0;
+        }
+        out[i] = p;
+    }
+}
 
 force_inline_ double p_exact(double U, size_t n1, size_t n2) {
     using U64 = unsigned long long;
@@ -15,14 +99,27 @@ force_inline_ double p_exact(double U, size_t n1, size_t n2) {
     const size_t Umax = n1 * n2;
     if unlikely_(Umax == 0) return 1.0;
 
-    // clamp & floor like SciPy
     const double U_clip = std::max(0.0, std::min(static_cast<double>(Umax), U));
     const size_t u_stat = static_cast<size_t>(std::floor(U_clip));
 
-    // DP buffers: 只写 0..up 区间，每次避免 O(SZ) 清零
     const size_t SZ = Umax + 1;
-    alignas_(64) U64 dp[SZ];
-    alignas_(64) U64 ndp[SZ];
+    const size_t STACK_LIMIT = 1 << 12; // 4096 元素以内走栈
+
+    U64* dp     = nullptr;
+    U64* ndp    = nullptr;
+    bool on_heap = false;
+
+    alignas(64) U64 dp_stack[STACK_LIMIT];
+    alignas(64) U64 ndp_stack[STACK_LIMIT];
+
+    if (SZ <= STACK_LIMIT) {
+        dp  = dp_stack;
+        ndp = ndp_stack;
+    } else {
+        dp  = static_cast<U64*>(::operator new[](SZ * sizeof(U64), std::align_val_t(64)));
+        ndp = static_cast<U64*>(::operator new[](SZ * sizeof(U64), std::align_val_t(64)));
+        on_heap = true;
+    }
 
     // 初始化
     dp[0] = 1ULL;
@@ -34,7 +131,7 @@ force_inline_ double p_exact(double U, size_t n1, size_t n2) {
 
     for (size_t i = 1; i <= n1; ++i) {
         const size_t prev_up = (i - 1) * n2;
-        const size_t up      =  i      * n2;
+        const size_t up      = i * n2;
 
         U64 win = 0ULL;
 
@@ -51,10 +148,11 @@ force_inline_ double p_exact(double U, size_t n1, size_t n2) {
             dp_nxt[u] = win;
         }
 
-        // 清理下一轮 buffer
         for (size_t j = 0; j <= up; ++j) dp_cur[j] = 0ULL;
 
-        U64* tmp = dp_cur; dp_cur = dp_nxt; dp_nxt = tmp;
+        U64* tmp = dp_cur;
+        dp_cur = dp_nxt;
+        dp_nxt = tmp;
     }
 
     double total = 0.0;
@@ -77,63 +175,61 @@ force_inline_ double p_exact(double U, size_t n1, size_t n2) {
     } else {
         sf_ge = cdf_small / total;
     }
+
+    // 释放堆内存
+    if (on_heap) {
+        ::operator delete[](dp,  std::align_val_t(64));
+        ::operator delete[](ndp, std::align_val_t(64));
+    }
+
     return sf_ge;
 }
+
 
 force_inline_ void p_asymptotic_parallel(
     const double* U1, const double* n1, const double* n2,
     const double* tie_sum, const double* cc,
     double* out, size_t N,
     MannWhitneyuOption::Alternative alt,
+    bool fast_norm,
     int threads
 ) {
-    threads = (threads < 0) ? omp_get_max_threads()
-                : (threads > omp_get_max_threads() ? omp_get_max_threads() : threads);
+    const int maxth = omp_get_max_threads();
+    if (threads < 0) threads = maxth;
+    if (threads > maxth) threads = maxth;
 
-    using D = HWY_FULL(double);
-    D d;
-    const size_t step = Lanes(d);
+    using AsympFn = void(*)(const double*, const double*, const double*, const double*, const double*, double*, size_t);
 
-    #pragma omp parallel
+    // fast 路径（原 SIMD 实现）
+    AsympFn fn_fast = nullptr;
+    switch (alt) {
+    case MannWhitneyuOption::Alternative::two_sided: fn_fast = array_p_asymptotic_two_sided; break;
+    case MannWhitneyuOption::Alternative::greater:   fn_fast = array_p_asymptotic_greater;   break;
+    case MannWhitneyuOption::Alternative::less:      fn_fast = array_p_asymptotic_less;      break;
+    }
+
+    // precise 路径（erfc-based）
+    AsympFn fn_precise = nullptr;
+    switch (alt) {
+    case MannWhitneyuOption::Alternative::two_sided: fn_precise = array_p_asymptotic_two_sided_precise; break;
+    case MannWhitneyuOption::Alternative::greater:   fn_precise = array_p_asymptotic_greater_precise;   break;
+    case MannWhitneyuOption::Alternative::less:      fn_precise = array_p_asymptotic_less_precise;      break;
+    }
+
+    AsympFn fn = fast_norm ? fn_fast : fn_precise;
+
+    #pragma omp parallel num_threads(threads)
     {
-        int tid = omp_get_thread_num();
-        const int nth = threads;
+        const int tid = omp_get_thread_num();
+        const int nth = omp_get_num_threads();
 
-        size_t chunk_per_thread = (N + nth - 1) / nth;
-        size_t begin = tid * chunk_per_thread;
-        size_t end   = std::min(N, begin + chunk_per_thread);
-
-        // 对齐 begin 到 step 的倍数（便于 SIMD）
-        if (tid > 0) {
-            size_t misalign = begin % step;
-            if (misalign != 0) {
-                begin += (step - misalign);
-                if (begin > end) begin = end;
-            }
-        }
-
-        switch (alt) {
-            case MannWhitneyuOption::Alternative::two_sided:
-                array_p_asymptotic_two_sided(
-                    U1 + begin, n1 + begin, n2 + begin,
-                    tie_sum + begin, cc + begin,
-                    out + begin, end - begin
-                );
-                break;
-            case MannWhitneyuOption::Alternative::greater:
-                array_p_asymptotic_greater(
-                    U1 + begin, n1 + begin, n2 + begin,
-                    tie_sum + begin, cc + begin,
-                    out + begin, end - begin
-                );
-                break;
-            case MannWhitneyuOption::Alternative::less:
-                array_p_asymptotic_less(
-                    U1 + begin, n1 + begin, n2 + begin,
-                    tie_sum + begin, cc + begin,
-                    out + begin, end - begin
-                );
-                break;
+        const size_t chunk = (N + nth - 1) / nth;
+        const size_t begin = tid * chunk;
+        const size_t end   = std::min(N, begin + chunk);
+        
+        if (begin < end) {
+            fn(U1 + begin, n1 + begin, n2 + begin, tie_sum + begin, cc + begin,
+               out + begin, end - begin);
         }
     }
 }
@@ -514,6 +610,179 @@ static inline bool is_valid_value(T x) {
     else return true;
 }
 
+// 辅助：按段归并（不含 0 的纯负或纯正段），返回更新后的 rank（1-based）
+static inline size_t merge_and_rank_segment(
+    const double* a, size_t na,
+    const double* b, size_t nb,
+    size_t rank,                // 进入该段前的当前秩（1-based）
+    double& R1, double& tie_sum, bool& has_tie
+) {
+    size_t i = 0, j = 0;
+    while (i < na || j < nb) {
+        double v; bool take_a = false, take_b = false;
+
+        if (i < na && j < nb) {
+            if (a[i] < b[j]) { v = a[i]; take_a = true; }
+            else if (b[j] < a[i]) { v = b[j]; take_b = true; }
+            else { v = a[i]; take_a = take_b = true; }
+        } else if (i < na) {
+            v = a[i]; take_a = true;
+        } else {
+            v = b[j]; take_b = true;
+        }
+
+        size_t eq_a = 0, eq_b = 0;
+        if (take_a) { while (i + eq_a < na && !(a[i + eq_a] < v) && !(v < a[i + eq_a])) ++eq_a; }
+        if (take_b) { while (j + eq_b < nb && !(b[j + eq_b] < v) && !(v < b[j + eq_b])) ++eq_b; }
+
+        const size_t t = eq_a + eq_b;
+        const double start = static_cast<double>(rank);
+        const double end   = static_cast<double>(rank + t - 1);
+        const double avg   = 0.5 * (start + end);
+
+        R1 += static_cast<double>(eq_a) * avg;
+
+        if (t > 1) {
+            const double tt = static_cast<double>(t);
+            tie_sum += (tt * tt * tt - tt);
+            has_tie = true;
+        }
+
+        rank += t;
+        i += eq_a; j += eq_b;
+    }
+    return rank;
+}
+
+// 显式 + 隐式 0 全量归并（中位语义）：负段 -> 零段(显式0+隐式0) -> 正段
+static inline void merge_rank_sum_with_tie_include_zeros(
+    const double* a, size_t n1_exp,         // 参考组显式值（升序）
+    const double* b, size_t n2_exp,         // 目标组显式值（升序）
+    size_t a_zero_implicit,                 // 参考组该列隐式(缺省)0 的数量
+    size_t b_zero_implicit,                 // 目标组该列隐式(缺省)0 的数量
+    double& R1, double& tie_sum, bool& has_tie
+) {
+    R1 = 0.0; tie_sum = 0.0; has_tie = false;
+
+    // 划分 a 的负/零/正三段
+    size_t ai_neg_end = 0; while (ai_neg_end < n1_exp && a[ai_neg_end] < 0.0) ++ai_neg_end;
+    size_t ai_zero_end = ai_neg_end;
+    while (ai_zero_end < n1_exp && !(0.0 < a[ai_zero_end]) && !(a[ai_zero_end] < 0.0)) ++ai_zero_end;
+
+    const size_t a_neg_n   = ai_neg_end;
+    const size_t a_zero_exp= ai_zero_end - ai_neg_end;
+    const size_t a_pos_n   = n1_exp - ai_zero_end;
+
+    // 划分 b 的负/零/正三段
+    size_t bi_neg_end = 0; while (bi_neg_end < n2_exp && b[bi_neg_end] < 0.0) ++bi_neg_end;
+    size_t bi_zero_end = bi_neg_end;
+    while (bi_zero_end < n2_exp && !(0.0 < b[bi_zero_end]) && !(b[bi_zero_end] < 0.0)) ++bi_zero_end;
+
+    const size_t b_neg_n   = bi_neg_end;
+    const size_t b_zero_exp= bi_zero_end - bi_neg_end;
+    const size_t b_pos_n   = n2_exp - bi_zero_end;
+
+    // 总零个数（显式0 + 隐式0）
+    const size_t A_zero_total = a_zero_exp + a_zero_implicit;
+    const size_t B_zero_total = b_zero_exp + b_zero_implicit;
+
+    size_t rank = 1; // 全局 1-based 秩
+
+    // 负值段归并
+    rank = merge_and_rank_segment(
+        a, a_neg_n,
+        b, b_neg_n,
+        rank, R1, tie_sum, has_tie
+    );
+
+    // 零值段（若存在）
+    const size_t t_zero = A_zero_total + B_zero_total;
+    if (t_zero > 0) {
+        const double start = static_cast<double>(rank);
+        const double end   = static_cast<double>(rank + t_zero - 1);
+        const double avg   = 0.5 * (start + end);
+
+        R1 += static_cast<double>(A_zero_total) * avg;
+
+        if (t_zero > 1) {
+            const double tz = static_cast<double>(t_zero);
+            tie_sum += (tz * tz * tz - tz);
+            has_tie = true;
+        }
+        rank += t_zero;
+    }
+
+    // 正值段归并
+    rank = merge_and_rank_segment(
+        a + ai_zero_end, a_pos_n,
+        b + bi_zero_end, b_pos_n,
+        rank, R1, tie_sum, has_tie
+    );
+}
+
+// 极端语义：0 在头/尾（全局最小或全局最大）
+static inline void merge_rank_sum_with_tie_zero_extreme(
+    const double* a, size_t n1_exp,         // 参考组显式值（已升序）
+    const double* b, size_t n2_exp,         // 目标组显式值（已升序）
+    size_t a_zero_implicit,                 // 参考组该列隐式(缺省)0 的数量
+    size_t b_zero_implicit,                 // 目标组该列隐式(缺省)0 的数量
+    bool zero_at_head,                      // true=0在头(min), false=0在尾(max)
+    double& R1, double& tie_sum, bool& has_tie
+) {
+    R1 = 0.0; tie_sum = 0.0; has_tie = false;
+
+    // a 的负/零/正段
+    size_t ai_neg_end = 0; while (ai_neg_end < n1_exp && a[ai_neg_end] < 0.0) ++ai_neg_end;
+    size_t ai_zero_end = ai_neg_end;
+    while (ai_zero_end < n1_exp && !(0.0 < a[ai_zero_end]) && !(a[ai_zero_end] < 0.0)) ++ai_zero_end;
+
+    const size_t a_neg_n    = ai_neg_end;
+    const size_t a_zero_exp = ai_zero_end - ai_neg_end;
+    const size_t a_pos_n    = n1_exp - ai_zero_end;
+
+    // b 的负/零/正段
+    size_t bi_neg_end = 0; while (bi_neg_end < n2_exp && b[bi_neg_end] < 0.0) ++bi_neg_end;
+    size_t bi_zero_end = bi_neg_end;
+    while (bi_zero_end < n2_exp && !(0.0 < b[bi_zero_end]) && !(b[bi_zero_end] < 0.0)) ++bi_zero_end;
+
+    const size_t b_neg_n    = bi_neg_end;
+    const size_t b_zero_exp = bi_zero_end - bi_neg_end;
+    const size_t b_pos_n    = n2_exp - bi_zero_end;
+
+    const size_t A_zero_total = a_zero_exp + a_zero_implicit;
+    const size_t B_zero_total = b_zero_exp + b_zero_implicit;
+    const size_t t_zero = A_zero_total + B_zero_total;
+
+    size_t rank = 1; // 全局 1-based 秩
+
+    auto emit_zero_block = [&](size_t& rk){
+        if (t_zero > 0) {
+            const double start = static_cast<double>(rk);
+            const double end   = static_cast<double>(rk + t_zero - 1);
+            const double avg   = 0.5 * (start + end);
+            R1 += static_cast<double>(A_zero_total) * avg;
+            if (t_zero > 1) {
+                const double tz = static_cast<double>(t_zero);
+                tie_sum += (tz * tz * tz - tz);
+                has_tie = true;
+            }
+            rk += t_zero;
+        }
+    };
+
+    if (zero_at_head) emit_zero_block(rank);
+
+    // 非零部分：先负值段，再正值段（负<正，无跨段并列）
+    rank = merge_and_rank_segment(a,               a_neg_n,
+                                  b,               b_neg_n,
+                                  rank, R1, tie_sum, has_tie);
+    rank = merge_and_rank_segment(a + ai_zero_end, a_pos_n,
+                                  b + bi_zero_end, b_pos_n,
+                                  rank, R1, tie_sum, has_tie);
+
+    if (!zero_at_head) emit_zero_block(rank);
+}
+
 // 合并两有序数组，返回参考组秩和 R1 与并列修正量 tie_sum，has_tie 标志
 static inline void merge_rank_sum_with_tie(
     const double* a, size_t n1,
@@ -570,26 +839,16 @@ static inline void merge_rank_sum_with_tie(
 template<class T>
 inline std::pair<std::vector<double>, std::vector<double>>
 mannWhitneyu_core(
-    const T*           data,        // nnz
-    const int64_t*     indices,     // nnz
-    const int64_t*     indptr,      // C+1
-    const size_t&      R,
-    const size_t&      C,
-    const size_t&      nnz,
-    std::vector<int32_t>&  group_id,    // size=R, 值域 {0..n_targets}
-    size_t             n_targets,
-    const MannWhitneyuOption& opt,
-    int                threads
-) {
-    if (group_id.size() != R)
-        throw std::invalid_argument("[mannwhitney] group_id length must equal R");
-    if (n_targets == 0)
-        return { {}, {} };
+    const T* data, const int64_t* indices, const int64_t* indptr,
+    const size_t& R, const size_t& C, const size_t& nnz,
+    const int32_t* group_id, size_t n_targets,
+    const MannWhitneyuOption& opt, int threads
+){
+    if (n_targets == 0) return { {}, {} };
 
-    const size_t G = n_targets + 1; // 0: ref
+    const size_t G = n_targets + 1;
     const size_t Npairs = C * n_targets;
 
-    // ------- 输出与中间数组（全部 double） -------
     std::vector<double> U1_out(Npairs, 0.0);
     std::vector<double> P_out (Npairs, 1.0);
     std::vector<double> n1_arr(Npairs, 0.0);
@@ -597,108 +856,209 @@ mannWhitneyu_core(
     std::vector<double> tie_arr(Npairs, 0.0);
     std::vector<double> cc_arr (Npairs, opt.use_continuity ? 0.5 : 0.0);
 
-    // ------- 预估各组行数（仅用于 reserve，避免频繁扩容） -------
-    std::vector<size_t> gcount(G, 0);
+    // 组行数（用于 sparse 的总样本量）
+    std::vector<size_t> group_rows(G, 0);
     for (size_t r = 0; r < R; ++r) {
         int g = group_id[r];
-        if (g >= 0 && size_t(g) < G) ++gcount[size_t(g)];
+        if (g >= 0 && size_t(g) < G) ++group_rows[size_t(g)];
     }
 
-    // ------- 列并行：收集显式值 -> 条件排序 -> 计算 U1 / tie / n1 / n2 -------
     if (threads < 0) threads = omp_get_max_threads();
     if (threads > omp_get_max_threads()) threads = omp_get_max_threads();
 
-    // 错误标记：用于在并行区外统一处理错误
+    // 错误标记
     std::atomic<bool> has_error{false};
     std::string error_message;
-    
-    #pragma omp parallel for schedule(static) num_threads(threads)
-    for (std::ptrdiff_t cc = 0; cc < (std::ptrdiff_t)C; ++cc) {
-        const size_t c = (size_t)cc;
 
-        // 每列的临时容器（以 double 计算）
-        std::vector<std::vector<double>> gvals(G);
-        for (size_t g = 0; g < G; ++g) gvals[g].reserve(gcount[g]);
+    // ---- 排序派发（把"要不要排"提前成函数指针；列内只调用，不再判分支）
+    using SortFn = void(*)(double*, size_t);
+    auto sort_impl = +[](double* ptr, size_t n){
+        if (n > 1) hwy::HWY_NAMESPACE::VQSortStatic(ptr, n, hwy::SortAscending());
+    };
+    auto sort_noop = +[](double*, size_t){};
+    SortFn sort_ref = opt.ref_sorted ? sort_noop : sort_impl;
+    SortFn sort_tar = opt.tar_sorted ? sort_noop : sort_impl;
 
-        const int64_t p0 = indptr[c];
-        const int64_t p1 = indptr[c + 1];
+    // ---- tie 校正派发（避免每列 if）
+    const double tie_mask = opt.tie_correction ? 1.0 : 0.0;
 
-        // 收集显式值到各组
+    // ---- 一个小工具：并行跑指定列处理体
+    auto run_cols = [&](auto&& body) {
+        #pragma omp parallel for schedule(static) num_threads(threads)
+        for (std::ptrdiff_t cc = 0; cc < (std::ptrdiff_t)C; ++cc) {
+            const size_t c = (size_t)cc;
+            body(c);
+        }
+    };
+
+    // ---- 共享的"收集+排序"封装：每列建 gvals，然后按派发的 sort_ref/sort_tar 排序
+    auto build_and_sort_gvals = [&](size_t c, std::vector<std::vector<double>>& gvals){
+        gvals.assign(G, {});
+        for (size_t g = 0; g < G; ++g) gvals[g].reserve(group_rows[g]);
+
+        const int64_t p0 = indptr[c], p1 = indptr[c + 1];
         for (int64_t p = p0; p < p1; ++p) {
             const int64_t r = indices[p];
             if (r < 0 || size_t(r) >= R) continue;
             const int g = group_id[size_t(r)];
-            if (g < 0 || size_t(g) >= G) continue;
+            if (g < 0 || size_t(g) >= (int)G) continue;
             const double v = static_cast<double>(data[p]);
             if (!is_valid_value(v)) continue;
             gvals[size_t(g)].push_back(v);
         }
+        // 排序
+        sort_ref(gvals[0].data(), gvals[0].size());
+        for (size_t g = 1; g < G; ++g)
+            sort_tar(gvals[g].data(), gvals[g].size());
+    };
 
-        // 排序（保留 T 类型）
-        if (!opt.ref_sorted && gvals[0].size() > 1)
-            hwy::HWY_NAMESPACE::VQSortStatic(gvals[0].data(), gvals[0].size(), hwy::SortAscending());
-        if (!opt.tar_sorted) {
+    // =========================
+    // zero_handling 派发（分支外移），每个分支**内部**并行
+    // =========================
+    switch (opt.zero_handling) {
+    case MannWhitneyuOption::none: {
+        run_cols([&](size_t c){
+            std::vector<std::vector<double>> gvals;
+            build_and_sort_gvals(c, gvals);
+
+            const size_t n1_total = gvals[0].size();
+            if (n1_total < 2) {
+                if (!has_error.exchange(true))
+                    error_message = "Sample too small for reference at column " + std::to_string(c);
+                return;
+            }
+
             for (size_t g = 1; g < G; ++g) {
-                if (gvals[g].size() > 1)
-                    hwy::HWY_NAMESPACE::VQSortStatic(gvals[g].data(), gvals[g].size(), hwy::SortAscending());
-            }
-        }
-
-        const size_t n1 = gvals[0].size();
-        if unlikely_(n1 < 2) {
-            // 使用原子操作标记错误，避免在并行区直接throw
-            if (!has_error.exchange(true)) {
-                error_message = "Sample too small for reference at column " + std::to_string(c);
-            }
-            continue; // 跳过这一列
-        }
-
-        // 逐目标组计算
-        for (size_t g = 1; g < G; ++g) {
-            const size_t n2 = gvals[g].size();
-            if unlikely_(n2 < 2) {
-                // 使用原子操作标记错误，避免在并行区直接throw
-                if (!has_error.exchange(true)) {
-                    error_message = "Sample too small for group " + std::to_string(g) +
-                                   " at column " + std::to_string(c);
+                const size_t n2_total = gvals[g].size();
+                if (n2_total < 2) {
+                    if (!has_error.exchange(true))
+                        error_message = "Sample too small for group " + std::to_string(g) +
+                                        " at column " + std::to_string(c);
+                    continue;
                 }
-                continue; // 跳过这一组
+
+                double R1 = 0.0, tie_sum = 0.0; bool has_tie = false;
+                merge_rank_sum_with_tie(
+                    gvals[0].data(), gvals[0].size(),
+                    gvals[g].data(), gvals[g].size(),
+                    R1, tie_sum, has_tie
+                );
+
+                const double n1d = static_cast<double>(n1_total);
+                const double U1  = R1 - n1d * (n1d + 1.0) * 0.5;
+
+                const size_t idx = c * n_targets + (g - 1);
+                U1_out[idx]  = U1;
+                n1_arr[idx]  = n1d;
+                n2_arr[idx]  = static_cast<double>(n2_total);
+                tie_arr[idx] = tie_sum * tie_mask;  // 避免 if
+            }
+        });
+    } break;
+
+    case MannWhitneyuOption::min:  // 0 在头
+    case MannWhitneyuOption::max:  // 0 在尾
+    {
+        const bool zero_at_head = (opt.zero_handling == MannWhitneyuOption::min);
+        run_cols([&](size_t c){
+            std::vector<std::vector<double>> gvals;
+            build_and_sort_gvals(c, gvals);
+
+            const size_t n1_total = group_rows[0];
+            if (n1_total < 2) {
+                if (!has_error.exchange(true))
+                    error_message = "Sample too small for reference at column " + std::to_string(c);
+                return;
             }
 
-            double R1 = 0.0, tie_sum = 0.0;
-            bool has_tie = false;
+            const size_t a_zero_imp = group_rows[0] - gvals[0].size();
 
-            merge_rank_sum_with_tie(
-                gvals[0].data(), gvals[0].size(),
-                gvals[g].data(), gvals[g].size(),
-                R1, tie_sum, has_tie
-            );
-            if (!opt.tie_correction) tie_sum = 0.0;
+            for (size_t g = 1; g < G; ++g) {
+                const size_t n2_total = group_rows[g];
+                if (n2_total < 2) {
+                    if (!has_error.exchange(true))
+                        error_message = "Sample too small for group " + std::to_string(g) +
+                                        " at column " + std::to_string(c);
+                    continue;
+                }
+                const size_t b_zero_imp = group_rows[g] - gvals[g].size();
 
-            const double base = static_cast<double>(n1) * (static_cast<double>(n1) + 1.0) * 0.5;
-            const double U1   = R1 - base;
+                double R1 = 0.0, tie_sum = 0.0; bool has_tie = false;
+                merge_rank_sum_with_tie_zero_extreme(
+                    gvals[0].data(), gvals[0].size(),
+                    gvals[g].data(), gvals[g].size(),
+                    a_zero_imp, b_zero_imp,
+                    /*zero_at_head=*/zero_at_head,
+                    R1, tie_sum, has_tie
+                );
 
-            const size_t idx = c * n_targets + (g - 1);
-            U1_out[idx]  = U1;
-            n1_arr[idx]  = static_cast<double>(n1);
-            n2_arr[idx]  = static_cast<double>(n2);
-            tie_arr[idx] = tie_sum;
-            // cc_arr[idx] 已初始化
-        }
+                const double n1d = static_cast<double>(n1_total);
+                const double U1  = R1 - n1d * (n1d + 1.0) * 0.5;
+
+                const size_t idx = c * n_targets + (g - 1);
+                U1_out[idx]  = U1;
+                n1_arr[idx]  = n1d;
+                n2_arr[idx]  = static_cast<double>(n2_total);
+                tie_arr[idx] = tie_sum * tie_mask;
+            }
+        });
+    } break;
+
+    case MannWhitneyuOption::mix: { // 负段 | 零段 | 正段
+        run_cols([&](size_t c){
+            std::vector<std::vector<double>> gvals;
+            build_and_sort_gvals(c, gvals);
+
+            const size_t n1_total = group_rows[0];
+            if (n1_total < 2) {
+                if (!has_error.exchange(true))
+                    error_message = "Sample too small for reference at column " + std::to_string(c);
+                return;
+            }
+            const size_t a_zero_imp = group_rows[0] - gvals[0].size();
+
+            for (size_t g = 1; g < G; ++g) {
+                const size_t n2_total = group_rows[g];
+                if (n2_total < 2) {
+                    if (!has_error.exchange(true))
+                        error_message = "Sample too small for group " + std::to_string(g) +
+                                        " at column " + std::to_string(c);
+                    continue;
+                }
+                const size_t b_zero_imp = group_rows[g] - gvals[g].size();
+
+                double R1 = 0.0, tie_sum = 0.0; bool has_tie = false;
+                merge_rank_sum_with_tie_include_zeros(
+                    gvals[0].data(), gvals[0].size(),
+                    gvals[g].data(), gvals[g].size(),
+                    a_zero_imp, b_zero_imp,
+                    R1, tie_sum, has_tie
+                );
+
+                const double n1d = static_cast<double>(n1_total);
+                const double U1  = R1 - n1d * (n1d + 1.0) * 0.5;
+
+                const size_t idx = c * n_targets + (g - 1);
+                U1_out[idx]  = U1;
+                n1_arr[idx]  = n1d;
+                n2_arr[idx]  = static_cast<double>(n2_total);
+                tie_arr[idx] = tie_sum * tie_mask;
+            }
+        });
+    } break;
     }
 
-    // 检查是否有错误发生
-    if (has_error.load()) {
-        throw std::runtime_error(error_message);
-    }
+    if (has_error.load()) throw std::runtime_error(error_message);
 
-    // ------- 退出并行后：用并行 p 计算器 -------
+    // ---- p 值：这里已无列循环内分支，方法分支也已经在函数粒度（成本低）
     if (opt.method == MannWhitneyuOption::asymptotic) {
         p_asymptotic_parallel(
             U1_out.data(), n1_arr.data(), n2_arr.data(),
             tie_arr.data(), cc_arr.data(),
             P_out.data(), Npairs,
-            opt.alternative, threads
+            opt.alternative,
+            opt.fast_norm,
+            threads
         );
     } else {
         p_exact_parallel(
@@ -711,101 +1071,177 @@ mannWhitneyu_core(
     return { std::move(U1_out), std::move(P_out) };
 }
 
+template<class T>
 MWUResult mannwhitneyu(
-    const std::variant<view::CscView, view::CsrView>& A,
-    const torch::Tensor& group_id,
-    const size_t& n_groups,
+    const view::CscView<T>& A,
+    const int32_t* group_id,   // group_id 指针
+    const size_t&  n_targets,   // 目标组的数量（值域大小）
     const MannWhitneyuOption& option,
-    const int threads,
-    size_t* /*progress_ptr*/
+    const int      threads,
+    size_t*        /*progress_ptr*/
 ) {
     // ===== 取出三元数组 =====
-    const torch::Tensor* data_ptr    = nullptr;
-    const torch::Tensor* indices_ptr = nullptr;
-    const torch::Tensor* indptr_ptr  = nullptr;
-    size_t R = 0, C = 0, nnz = 0;
+    const T* data = A.data();
+    const int64_t* indices = A.indices();
+    const int64_t* indptr  = A.indptr();
+    size_t C = A.cols();
+    size_t R = A.rows();
+    size_t nnz = A.nnz();
 
-    if (std::holds_alternative<view::CscView>(A)) {
-        const auto& V = std::get<view::CscView>(A);
-        data_ptr    = &V.data_;
-        indices_ptr = &V.indices_;
-        indptr_ptr  = &V.indptr_;
-        R = V.rows(); C = V.cols(); nnz = V.nnz();
-    } else {
-        const auto& V = std::get<view::CsrView>(A);
-        data_ptr    = &V.data_;
-        indices_ptr = &V.indices_;
-        indptr_ptr  = &V.indptr_;
-        // 你已在外层把 CSR 视作“翻转后的 CSC”，这里直接用：
-        C = V.rows(); R = V.cols(); nnz = V.nnz();
+    if (n_targets < 1) {
+        throw std::runtime_error("[mannwhitney] n_targets must be >= 1 (>=1 target groups)");
     }
 
-    const auto& data    = *data_ptr;
-    const auto& indices = *indices_ptr;
-    const auto& indptr  = *indptr_ptr;
-
-    // ===== 形状与 dtype 校验 =====
-    TORCH_CHECK(indices.scalar_type() == torch::kLong,
-        "[mannwhitney] indices must be int64 (torch.long)");
-    TORCH_CHECK(indptr.scalar_type()  == torch::kLong,
-        "[mannwhitney] indptr must be int64 (torch.long)");
-    TORCH_CHECK(group_id.scalar_type() == torch::kInt,
-        "[mannwhitney] group_id must be int32 (torch.int)");
-
-    TORCH_CHECK(group_id.dim() == 1 && static_cast<size_t>(group_id.numel()) == R,
-        "[mannwhitney] group_id length must equal R");
-
-    TORCH_CHECK(static_cast<size_t>(indptr.numel()) == C + 1,
-        "[mannwhitney] indptr length must be C+1");
-    TORCH_CHECK(static_cast<size_t>(indices.numel()) == nnz &&
-                static_cast<size_t>(data.numel())    == nnz,
-        "[mannwhitney] indices/data length must equal nnz");
-
-    // ===== 确保 CPU 连续内存 =====
-    auto data_c    = data.contiguous().to(torch::kCPU);
-    auto indices_c = indices.contiguous().to(torch::kCPU);
-    auto indptr_c  = indptr.contiguous().to(torch::kCPU);
-    auto gid_c     = group_id.contiguous().to(torch::kCPU);
-
-    const int64_t* idx_ptr   = indptr_c.data_ptr<int64_t>();
-    const int64_t* row_ptr   = indices_c.data_ptr<int64_t>();
-    const int32_t* gid_ptr32 = gid_c.data_ptr<int32_t>();
-
-    // ===== group_id -> std::vector<int32_t> =====
-    std::vector<int32_t> gid_vec(R);
-    std::memcpy(gid_vec.data(), gid_ptr32, R * sizeof(int32_t));
-
-    const size_t n_targets = (n_groups == 0 ? 0 : (n_groups - 1));
-    TORCH_CHECK(n_targets > 0, "[mannwhitney] n_groups must be >= 2 (reference + at least one target)");
-
-    // ===== 输出 Tensor（double） =====
-    auto options_double = torch::TensorOptions().dtype(torch::kFloat64).device(torch::kCPU);
-    torch::Tensor U1_out = torch::empty({static_cast<long>(C), static_cast<long>(n_targets)}, options_double);
-    torch::Tensor P_out  = torch::empty({static_cast<long>(C), static_cast<long>(n_targets)}, options_double);
-
-    // ===== 类型转发：data 任意标量类型 =====
-    AT_DISPATCH_ALL_TYPES(
-        data_c.scalar_type(), "mannwhitneyu_dispatch", [&] {
-            // 调用你实现的核心：两阶段并行（列并行 -> p 并行）
-            // 返回 std::pair<std::vector<double>, std::vector<double>>
-            auto ret = mannWhitneyu_core<scalar_t>(
-                data_c.data_ptr<scalar_t>(),
-                row_ptr,
-                idx_ptr,
-                R, C, nnz,
-                gid_vec,
-                n_targets,
-                option,
-                threads
-            );
-
-            // 拷贝到 double Tensor（结果已是 double）
-            std::memcpy(U1_out.data_ptr<double>(), ret.first.data(), ret.first.size() * sizeof(double));
-            std::memcpy(P_out.data_ptr<double>(),  ret.second.data(), ret.second.size() * sizeof(double));
-        }
+    // ===== 调用核心 =====
+    auto ret = mannWhitneyu_core<T>(
+        data,
+        indices,
+        indptr,
+        R, C, nnz,
+        group_id,      // 直接传指针
+        n_targets,
+        option,
+        threads
     );
 
-    return MWUResult{ std::move(U1_out), std::move(P_out) };
+    MWUResult result;
+    result.U1 = std::move(ret.first);
+    result.P  = std::move(ret.second);
+    return std::move(result);
 }
+
+// ========================= group_mean =========================
+// 计算每列、每组的均值：返回 size = C * G 的扁平数组，布局 [c * G + g]。
+// include_zeros=true 时：分母 = group_rows[g] - invalid_cnt[g]
+// （隐式0计入；显式无效值剔除）；false 时：分母 = valid_cnt[g]（仅显式有效计数）。
+// 显式无效值(!is_valid_value)不计入分子/分母。
+
+#include <algorithm> // std::fill
+
+template<class T>
+static force_inline_ std::vector<double>
+group_mean_core(
+    const T*           data,        // nnz
+    const int64_t*     indices,     // nnz
+    const int64_t*     indptr,      // C+1
+    const size_t&      R,
+    const size_t&      C,
+    const size_t&      /*nnz*/,
+    const int32_t*     group_id,    // size = R
+    const size_t&      n_groups,
+    bool               include_zeros,
+    int                threads
+){
+    const size_t G = n_groups;
+    if (G == 0 || C == 0) return {};
+
+    // 每组总行数：用于 include_zeros 分母基数
+    std::vector<size_t> group_rows(G, 0);
+    for (size_t r = 0; r < R; ++r) {
+        int g = group_id[r];
+        if (g >= 0 && size_t(g) < G) ++group_rows[size_t(g)];
+    }
+
+    if (threads < 0) threads = omp_get_max_threads();
+    if (threads > omp_get_max_threads()) threads = omp_get_max_threads();
+
+    std::vector<double> mean_out(C * G, 0.0);
+
+    // 列并行（动态调度）：线程内复用列缓冲
+    #pragma omp parallel num_threads(threads)
+{
+    std::vector<double> sum(G);
+    std::vector<size_t> valid_cnt(G);
+    std::vector<size_t> invalid_cnt(G);
+
+    #pragma omp for schedule(dynamic)
+    for (std::ptrdiff_t cc = 0; cc < (std::ptrdiff_t)C; ++cc) {
+        // 使用 memset 快速清零
+        std::memset(sum.data(),        0, G * sizeof(double));
+        std::memset(valid_cnt.data(),  0, G * sizeof(size_t));
+        std::memset(invalid_cnt.data(),0, G * sizeof(size_t));
+
+        const size_t c   = static_cast<size_t>(cc);
+        const int64_t p0 = indptr[c];
+        const int64_t p1 = indptr[c + 1];
+
+        for (int64_t p = p0; p < p1; ++p) {
+            const int64_t r = indices[p];
+            if (r < 0 || size_t(r) >= R) continue;
+
+            const int gi = group_id[size_t(r)];
+            if (gi < 0 || size_t(gi) >= G) continue;
+
+            const double v = static_cast<double>(data[p]);
+            if (is_valid_value(v)) {
+                sum[size_t(gi)] += v;
+                ++valid_cnt[size_t(gi)];
+            } else {
+                ++invalid_cnt[size_t(gi)];
+            }
+        }
+
+        double* out_col = mean_out.data() + c * G;
+        for (size_t g = 0; g < G; ++g) {
+            size_t denom = include_zeros
+                ? (group_rows[g] - invalid_cnt[g])   // 隐式0计入，显式无效剔除
+                :  valid_cnt[g];                      // 仅显式有效
+            out_col[g] = (denom > 0) ? (sum[g] / static_cast<double>(denom)) : 0.0;
+        }
+    }
+}
+
+    return std::move(mean_out);
+}
+
+// 对外包装：支持 CSC/CSR（CSR 视作“转置的 CSC”）
+template<class T>
+std::vector<double> group_mean(
+    const view::CscView<T>& A,
+    const int32_t* group_id,
+    const size_t&  n_groups,
+    bool           include_zeros,   // fold-change 场景建议传 true
+    int            threads
+){
+    const T* data = A.data();
+    const int64_t* indices = A.indices();
+    const int64_t* indptr  = A.indptr();
+    size_t C = A.cols();
+    size_t R = A.rows();
+    size_t nnz = A.nnz();
+
+    return std::move(group_mean_core<T>(
+        data, indices, indptr,
+        R, C, nnz,
+        group_id, n_groups,
+        include_zeros, threads
+    ));
+}
+
+// 显式实例化
+#define MWU_INSTANTIATE(T) \
+    template MWUResult mannwhitneyu<T>( \
+        const view::CscView<T>&, \
+        const int32_t*, \
+        const size_t&, \
+        const MannWhitneyuOption&, \
+        const int, \
+        size_t* \
+    );
+
+TYPE_DISPATCH(MWU_INSTANTIATE);
+#undef MWU_INSTANTIATE
+
+#define GROUP_MEAN_INSTANTIATE(T) \
+    template std::vector<double> group_mean<T>( \
+        const view::CscView<T>&, \
+        const int32_t*, \
+        const size_t&, \
+        bool, \
+        int \
+    );
+
+TYPE_DISPATCH(GROUP_MEAN_INSTANTIATE);
+#undef GROUP_MEAN_INSTANTIATE
 
 }

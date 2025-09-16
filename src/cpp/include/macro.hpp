@@ -1,52 +1,18 @@
 #pragma once
-
 #include "config.hpp"
 
-#define PROJECT_BEGIN namespace PROJECT_NAME {
-#define PROJECT_END }
-
-#if USE_OPENMP
-  #include <omp.h>
-  #define PARALLEL_REGION(threads) \
-    omp_set_num_threads(threads); \
-    _Pragma("omp parallel") {
-
-  #define PARALLEL_END(threads) \
-    } \
-    omp_set_num_threads(threads);
-
-  #define N_THREADS() omp_get_num_threads()
-  #define THREAD_ID() omp_get_thread_num()
-  #define MAX_THREADS() omp_get_max_threads()
-
-  // omp for
-  #define PARALLEL_FOR(SCHEDULE, ARGS, LOOP) \
-    _Pragma(HPDEXC_STRINGIFY(omp for schedule(SCHEDULE) ARGS)) \
-    { LOOP }
-
-  // atomic operation
-  #define ATOMIC(DO) \
-    _Pragma("omp atomic") { DO }
-
-  // critical section
-  #define CRITICAL(DO) \
-    _Pragma("omp critical") { DO }
-
-  #define HPDEXC_STRINGIFY(x) HPDEXC_STRINGIFY_IMPL(x)
-  #define HPDEXC_STRINGIFY_IMPL(x) #x
-#else
-  #define PARALLEL_REGION(threads) {
-  #define PARALLEL_END(threads) }
-  #define PARALLEL_FOR(SCHEDULE, ARGS, LOOP) { LOOP }
-  #define N_THREADS() 1
-  #define THREAD_ID() 0
-  #define MAX_THREADS() 1
-  #define ATOMIC(DO) { DO }
-  #define CRITICAL(DO) { DO }
-  #define HPDEXC_STRINGIFY(x) HPDEXC_STRINGIFY_IMPL(x)
-  #define HPDEXC_STRINGIFY_IMPL(x) #x
-#endif
-
+#define TYPE_DISPATCH(DO) \
+  DO(int8_t) \
+  DO(uint8_t) \
+  DO(int16_t) \
+  DO(int32_t) \
+  DO(int64_t) \
+  DO(uint16_t) \
+  DO(uint32_t) \
+  DO(uint64_t) \
+  DO(float16_t) \
+  DO(float32_t) \
+  DO(float64_t)
 
 // ============================================
 // tools

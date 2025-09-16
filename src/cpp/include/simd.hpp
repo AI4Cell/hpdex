@@ -7,18 +7,17 @@
 #include <limits>
 #include <cstring>
 
-#include "config.hpp" // HWY_STATIC_DEFINE
+#include "config.hpp"
+#include "dependencies.hpp"
 #include "macro.hpp"
 
 // ================================================================
-//      Conditional include Highway or fallback
+//      Conditional include Highway
 // ================================================================
-#include <hwy/highway.h> 
-#include <hwy/contrib/math/math-inl.h>
-#include <hwy/contrib/sort/vqsort-inl.h>
+
 namespace hn = hwy::HWY_NAMESPACE;
 
-PROJECT_BEGIN
+namespace hpdex {
 namespace simd {
 using namespace hn;
 
@@ -125,4 +124,4 @@ force_inline_ std::pair<T, T> array_reduce_minmax(const T* x, size_t n) {
 
 
 }
-PROJECT_END
+}

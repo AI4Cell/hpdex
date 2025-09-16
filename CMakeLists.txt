@@ -1,152 +1,122 @@
 cmake_minimum_required(VERSION 3.18)
 project(hpdex LANGUAGES CXX)
 
-# ============================================
-# 基础设置
-# ============================================
+# ===============================
+# 基础
+# ===============================
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
-
-# 导出编译命令，生成 compile_commands.json 文件
-# 这对于代码补全、静态分析和 IDE 支持非常有用
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# 获取项目根目录
-get_filename_component(ROOT_DIR ${CMAKE_CURRENT_SOURCE_DIR} ABSOLUTE)
-set(LIB_DIR "${ROOT_DIR}/Lib")
-
-# ============================================
-# 1. Python 和 pybind11 (uv 虚拟环境)
-# ============================================
-if(DEFINED ENV{VIRTUAL_ENV})
-    set(Python_ROOT_DIR $ENV{VIRTUAL_ENV})
+if(NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE Release)
 endif()
 
-find_package(Python REQUIRED COMPONENTS Interpreter Development)
-
+# ===============================
+# Python & pybind11
+# ===============================
+find_package(Python REQUIRED COMPONENTS Interpreter Development.Module)
 execute_process(
-    COMMAND ${Python_EXECUTABLE} -m pybind11 --cmakedir
-    OUTPUT_VARIABLE pybind11_DIR
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-    ERROR_QUIET
+  COMMAND ${Python_EXECUTABLE} -m pybind11 --cmakedir
+  OUTPUT_VARIABLE pybind11_DIR
+  OUTPUT_STRIP_TRAILING_WHITESPACE
+  ERROR_QUIET
 )
-
 if(pybind11_DIR)
-    list(APPEND CMAKE_PREFIX_PATH ${pybind11_DIR})
+  list(APPEND CMAKE_PREFIX_PATH ${pybind11_DIR})
 endif()
-find_package(pybind11 REQUIRED)
+find_package(pybind11 REQUIRED CONFIG)
 
-# ============================================
-# 2. Eigen
-# ============================================
-set(EIGEN3_INCLUDE_DIR "${LIB_DIR}/eigen-3.4.0")
-if(NOT EXISTS ${EIGEN3_INCLUDE_DIR})
-    message(FATAL_ERROR "Eigen not found at ${EIGEN3_INCLUDE_DIR}. Please install it first.")
+# ===============================
+# Highway（作为子模块/子目录）
+# ===============================
+set(HIGHWAY_DIR "${CMAKE_SOURCE_DIR}/Lib/highway")
+if(NOT EXISTS ${HIGHWAY_DIR})
+  message(FATAL_ERROR "Highway not found at ${HIGHWAY_DIR}")
 endif()
-include_directories(${EIGEN3_INCLUDE_DIR})
+set(HWY_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
+set(HWY_ENABLE_EXAMPLES OFF CACHE BOOL "" FORCE)
+add_subdirectory(${HIGHWAY_DIR} highway_build EXCLUDE_FROM_ALL)
 
-# ============================================
-# 3. LibTorch
-# ============================================
-list(APPEND CMAKE_PREFIX_PATH "${LIB_DIR}/libtorch")
-
-find_package(Torch QUIET)
-
-if(Torch_FOUND)
-    set(USE_TORCH ON)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
-    add_definitions(-DUSE_TORCH)
-else()
-    message(WARNING "LibTorch not found at ${LIB_DIR}/libtorch. Torch features disabled.")
-    set(USE_TORCH OFF)
-endif()
-
-# ============================================
-# 4. Highway
-# ============================================
-set(HIGHWAY_DIR "${LIB_DIR}/highway")
-if(EXISTS ${HIGHWAY_DIR})
-    set(HWY_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
-    set(HWY_ENABLE_EXAMPLES OFF CACHE BOOL "" FORCE)
-    add_subdirectory(${HIGHWAY_DIR} highway_build)
-    set(USE_HIGHWAY ON)
-else()
-    message(WARNING "Highway not found at ${HIGHWAY_DIR}. Disabled.")
-    set(USE_HIGHWAY OFF)
-endif()
-
-# ============================================
-# 5. OpenMP
-# ============================================
+# ===============================
+# OpenMP（可选）
+# ===============================
 find_package(OpenMP QUIET)
-if(OpenMP_CXX_FOUND)
-    set(USE_OPENMP ON)
-else()
-    message(WARNING "OpenMP not found. Disabled.")
-    set(USE_OPENMP OFF)
-endif()
 
-# ============================================
-# 平台特定设置
-# ============================================
+# ===============================
+# macOS 专项
+# ===============================
 if(APPLE)
-    set(CMAKE_MACOSX_RPATH ON)
-    set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
-    # macOS 上的 OpenMP (Homebrew)
-    if(EXISTS "/opt/homebrew/opt/libomp")
-        set(OpenMP_ROOT "/opt/homebrew/opt/libomp")
-    elseif(EXISTS "/usr/local/opt/libomp")
-        set(OpenMP_ROOT "/usr/local/opt/libomp")
-    endif()
-    if(OpenMP_ROOT)
-        include_directories("${OpenMP_ROOT}/include")
-        link_directories("${OpenMP_ROOT}/lib")
-        set(OpenMP_CXX_FLAGS "-Xpreprocessor -fopenmp")
-        set(OpenMP_CXX_LIB_NAMES "omp")
-        set(OpenMP_omp_LIBRARY "${OpenMP_ROOT}/lib/libomp.dylib")
-    endif()
-elseif(WIN32)
-    set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)
+  set(CMAKE_MACOSX_RPATH ON)
+  set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
+  # Python 扩展：避免在链接期解析 Python 符号
+  set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -undefined dynamic_lookup")
+
+  # 尝试 Homebrew libomp（若 find_package 失败）
+  if(NOT OpenMP_CXX_FOUND)
+    foreach(_omp_root "/opt/homebrew/opt/libomp" "/usr/local/opt/libomp")
+      if(EXISTS "${_omp_root}/lib/libomp.dylib")
+        message(STATUS "Using libomp at ${_omp_root}")
+        add_library(omp SHARED IMPORTED)
+        set_target_properties(omp PROPERTIES IMPORTED_LOCATION "${_omp_root}/lib/libomp.dylib")
+        set(OpenMP_CXX_FOUND TRUE)
+        set(_OMP_RPATH "${_omp_root}/lib")
+        include_directories("${_omp_root}/include")
+      endif()
+    endforeach()
+  endif()
 endif()
 
-# ============================================
-# 打印配置信息
-# ============================================
-message(STATUS "========================================")
-message(STATUS "Configuration Summary:")
-message(STATUS "  Python:     ${Python_EXECUTABLE}")
-message(STATUS "  pybind11:   ${pybind11_VERSION}")
-message(STATUS "  Eigen:      ${EIGEN3_INCLUDE_DIR}")
-message(STATUS "  LibTorch:   ${USE_TORCH}")
-message(STATUS "  Highway:    ${USE_HIGHWAY}")
-message(STATUS "  OpenMP:     ${USE_OPENMP}")
-message(STATUS "========================================")
-
-# ============================================
+# ===============================
 # Python 扩展模块
-# ============================================
+# ===============================
 pybind11_add_module(hpdex_cpp
-    src/cpp/module.cpp
-    src/cpp/mannwhitneyu.cpp
-    # 这里可以继续添加你的源码
+  src/cpp/module.cpp
+  src/cpp/mannwhitneyu.cpp
 )
 
 target_compile_features(hpdex_cpp PRIVATE cxx_std_17)
 
+# Release 模式启用 -O3 优化
+target_compile_options(hpdex_cpp PRIVATE $<$<CONFIG:Release>:-O3>)
+
+# 你的头文件路径（如有）
 target_include_directories(hpdex_cpp PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/cpp/include
-    ${EIGEN3_INCLUDE_DIR}
+  ${CMAKE_SOURCE_DIR}/src/cpp
+  ${CMAKE_SOURCE_DIR}/src/cpp/include
 )
 
-if(USE_TORCH)
-    target_link_libraries(hpdex_cpp PRIVATE ${TORCH_LIBRARIES})
+# Highway
+target_link_libraries(hpdex_cpp PRIVATE hwy hwy_contrib)
+
+# OpenMP（找到就连）
+if(OpenMP_CXX_FOUND)
+  target_link_libraries(hpdex_cpp PRIVATE OpenMP::OpenMP_CXX)
 endif()
 
-if(USE_HIGHWAY)
-    target_link_libraries(hpdex_cpp PRIVATE hwy)
+# 给 libomp 配 rpath（macOS）
+if(APPLE AND DEFINED _OMP_RPATH)
+  set_target_properties(hpdex_cpp PROPERTIES
+    BUILD_RPATH "${_OMP_RPATH}"
+    INSTALL_RPATH "${_OMP_RPATH}")
 endif()
 
-if(USE_OPENMP)
-    target_link_libraries(hpdex_cpp PRIVATE OpenMP::OpenMP_CXX)
+# ===============================
+# 安装（可选）
+# ===============================
+include(GNUInstallDirs)
+set(PY_INSTALL_DIR "${Python_SITEARCH}")
+if(NOT PY_INSTALL_DIR)
+  set(PY_INSTALL_DIR "${Python_SITELIB}")
 endif()
+if(NOT PY_INSTALL_DIR)
+  set(PY_INSTALL_DIR "${CMAKE_BINARY_DIR}")
+endif()
+message(STATUS "Python install dir: ${PY_INSTALL_DIR}")
+
+install(TARGETS hpdex_cpp
+  LIBRARY DESTINATION ${PY_INSTALL_DIR}
+  ARCHIVE DESTINATION ${PY_INSTALL_DIR}
+  RUNTIME DESTINATION ${PY_INSTALL_DIR}
+)

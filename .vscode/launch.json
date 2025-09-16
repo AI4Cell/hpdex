@@ -1,21 +1,53 @@
 {
-  "version": "0.2.0",
-  "configurations": [
-    {
-      "name": "Debug test (lldb)",
-      "type": "cppdbg",
-      "request": "launch",
-      "program": "/Users/wzq/Documents/Code/Project/westlake/hpdex/cpp_test/build/test",
-      "args": [],
-      "stopAtEntry": true,
-      "cwd": "/Users/wzq/Documents/Code/Project/westlake/hpdex/cpp_test/build",
-      "environment": [
-        { "name": "DYLD_LIBRARY_PATH", "value": "/opt/homebrew/opt/libomp/lib" }
-      ],
-      "externalConsole": false,
-      "MIMode": "lldb",
-      "preLaunchTask": "Build test (cpp_test)"
-    }
-  ]
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug C++ Extension",
+            "type": "lldb",
+            "request": "launch",
+            "program": "/opt/homebrew/bin/python3",
+            "args": ["${workspaceFolder}/test.py"],
+            "cwd": "${workspaceFolder}",
+            "environment": [
+                {
+                    "name": "PYTHONPATH",
+                    "value": "${workspaceFolder}/build:${env:PYTHONPATH}"
+                }
+            ],
+            "preLaunchTask": "build-debug",
+            "stopOnEntry": true,
+            "console": "integratedTerminal",
+            "sourceLanguages": ["cpp"]
+        },
+        {
+            "name": "Debug C++ with Breakpoints",
+            "type": "lldb",
+            "request": "launch",
+            "program": "/opt/homebrew/bin/python3",
+            "args": ["${workspaceFolder}/test.py"],
+            "cwd": "${workspaceFolder}",
+            "environment": [
+                {
+                    "name": "PYTHONPATH",
+                    "value": "${workspaceFolder}/build:${env:PYTHONPATH}"
+                }
+            ],
+            "preLaunchTask": "build-debug",
+            "stopOnEntry": false,
+            "console": "integratedTerminal",
+            "sourceLanguages": ["cpp"],
+            "postRunCommands": [
+                "breakpoint set --file ${workspaceFolder}/src/cpp/mannwhitneyu.cpp --line 714",
+                "breakpoint set --file ${workspaceFolder}/src/cpp/module.cpp --line 52"
+            ]
+        },
+        {
+            "name": "Attach to Running Python",
+            "type": "lldb",
+            "request": "attach",
+            "program": "/opt/homebrew/bin/python3",
+            "processId": "${command:pickProcess}",
+            "sourceLanguages": ["cpp"]
+        }
+    ]
 }
-
