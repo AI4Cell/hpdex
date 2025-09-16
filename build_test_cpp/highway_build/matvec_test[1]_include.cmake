@@ -1,5 +1,0 @@
-if(EXISTS "/Users/wzq/Documents/Code/Project/westlake/hpdex/build_test_cpp/highway_build/matvec_test[1]_tests.cmake")
-  include("/Users/wzq/Documents/Code/Project/westlake/hpdex/build_test_cpp/highway_build/matvec_test[1]_tests.cmake")
-else()
-  add_test(matvec_test_NOT_BUILT matvec_test_NOT_BUILT)
-endif()

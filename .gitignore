@@ -18,3 +18,5 @@ Lib/
 build/
 .DS_Store
 .cache
+
+cpp_test/

@@ -1,5 +1,0 @@
-if(EXISTS "/Users/wzq/Documents/Code/Project/westlake/hpdex/build_test_cpp/highway_build/transform_test[1]_tests.cmake")
-  include("/Users/wzq/Documents/Code/Project/westlake/hpdex/build_test_cpp/highway_build/transform_test[1]_tests.cmake")
-else()
-  add_test(transform_test_NOT_BUILT transform_test_NOT_BUILT)
-endif()
