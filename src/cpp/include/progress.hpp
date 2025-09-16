@@ -112,7 +112,7 @@ private:
             indicators::option::BarWidth{50},
             indicators::option::Start{"["},
             indicators::option::End{"]"},
-            indicators::option::PrefixText{name + ": "},
+            indicators::option::PrefixText{std::string(name) + ": "},
             indicators::option::ShowPercentage{true},
             indicators::option::ShowElapsedTime{true},
             indicators::option::ShowRemainingTime{true},

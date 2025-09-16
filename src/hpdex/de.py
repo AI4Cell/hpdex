@@ -128,7 +128,7 @@ def parallel_differential_expression(
         n_targets + 1,   # total groups = reference + targets
         include_zeros=True,
         threads=threads,
-    ).reshape(n_targets + 1, adata.n_vars)  # shape: (G, C)
+    ).reshape(adata.n_vars, n_targets + 1).T  # shape: (G, C)
 
     ref_means = means[0]
     tar_means = means[1:]
