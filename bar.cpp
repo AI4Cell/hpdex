@@ -1,41 +1,12 @@
-#include <cstddef>
-#include <vector>
-#include <string>
+
 #include <iostream>
-#include <thread>
+#include <chrono>
+#include <string>
 #include <mutex>
 #include <iomanip>
 #include <sstream>
+#include <thread>
 #include <algorithm>
-#include <atomic>
-#include <chrono>
-
-class ProgressTracker {
-public:
-    ProgressTracker(size_t nthreads)
-        : nthreads_(nthreads), progress_(nthreads, 0) {
-        raw_ptr_ = progress_.data();
-    }
-
-    size_t* ptr() { return raw_ptr_; }
-
-    size_t aggregate() const {
-        size_t sum = 0;
-        for (size_t i = 0; i < nthreads_; ++i) {
-            sum += progress_[i];
-        }
-        return sum;
-    }
-
-    size_t nthreads() const { return nthreads_; }
-
-private:
-    size_t nthreads_;
-    std::vector<size_t> progress_;
-    size_t* raw_ptr_;  // 非原子，不加锁，由外部控制
-};
-
-
 
 #ifdef _WIN32
     #include <windows.h>
@@ -168,17 +139,14 @@ public:
             // Unix/Linux/macOS 平台：使用 ANSI 转义序列
             std::cout << "\r\033[2K" << oss.str() << std::flush;
 #endif
+            if (current == total_) std::cout << std::endl;
         }
     }
 
     // 直接完成进度条
-    inline void complete() {
-        completed = true;
+    void complete() {
         update(total_);
-        std::cout << std::endl;
     }
-
-    inline bool is_completed() const { return completed; }
 
 private:
     // tqdm 风格时间：mm:ss / hh:mm:ss / Xd hh:mm:ss
@@ -218,83 +186,6 @@ private:
     bool use_unicode_;
     std::chrono::steady_clock::time_point start_time_;
     static std::mutex mu_;
-    bool completed = false;
 };
 
-class BarWrapper {
-private:
-    std::vector<ProgressBar> bars_;
-    std::vector<size_t> stage_totals_;  // 每个阶段的总量
-    ProgressTracker tracker_;
-    std::thread update_thread_;
-    std::atomic<bool> stop_flag_{false};
-    size_t current_stage_{0};
-    size_t cumulative_total_{0};  // 累计完成的总量
-    
-public:
-    BarWrapper(std::vector<ProgressBar> bars, std::vector<size_t> stage_totals, int nthreads) 
-        : bars_(std::move(bars)), stage_totals_(std::move(stage_totals)), tracker_(nthreads) {
-        // 验证阶段数量匹配
-        if (bars_.size() != stage_totals_.size()) {
-            throw std::invalid_argument("Number of bars must match number of stage totals");
-        }
-    }
-    
-    // 为了向后兼容，支持单个进度条的构造
-    BarWrapper(std::vector<ProgressBar> bars, int nthreads) 
-        : bars_(std::move(bars)), tracker_(nthreads) {
-        // 如果没有指定阶段总量，假设只有一个无限大的阶段
-        stage_totals_.resize(bars_.size(), SIZE_MAX);
-    }
 
-    void start(size_t time_interval = 100) {
-        stop_flag_ = false;
-        current_stage_ = 0;
-        cumulative_total_ = 0;
-        
-        update_thread_ = std::thread([this, time_interval]() {
-            while (!stop_flag_ && current_stage_ < bars_.size()) {
-                size_t sum = tracker_.aggregate();
-                
-                // 检查是否需要切换到下一个阶段
-                while (current_stage_ < bars_.size() && 
-                       sum >= cumulative_total_ + stage_totals_[current_stage_]) {
-                    
-                    // 完成当前阶段
-                    bars_[current_stage_].complete();
-                    cumulative_total_ += stage_totals_[current_stage_];
-                    current_stage_++;
-                }
-                
-                // 更新当前阶段的进度条
-                if (current_stage_ < bars_.size()) {
-                    size_t current_progress = sum - cumulative_total_;
-                    bars_[current_stage_].update(current_progress);
-                }
-                
-                std::this_thread::sleep_for(std::chrono::milliseconds(time_interval));
-            }
-        });
-    }
-    
-    void stop() {
-        stop_flag_ = true;
-        if (update_thread_.joinable()) {
-            update_thread_.join();
-        }
-        // 完成所有剩余的进度条
-        for (size_t i = current_stage_; i < bars_.size(); ++i) {
-            if (!bars_[i].is_completed()) {
-                bars_[i].complete();
-            }
-        }
-    }
-    
-    ~BarWrapper() {
-        stop();
-    }
-    
-    size_t* get_progress_ptr() {
-        return tracker_.ptr();
-    }
-};

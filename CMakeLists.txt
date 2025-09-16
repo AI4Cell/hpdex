@@ -41,33 +41,6 @@ set(HWY_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
 set(HWY_ENABLE_EXAMPLES OFF CACHE BOOL "" FORCE)
 add_subdirectory("${HIGHWAY_DIR}" highway_build EXCLUDE_FROM_ALL)
 
-# -----------------------------
-# Indicators（FetchContent 自动下载）
-# -----------------------------
-include(FetchContent)
-FetchContent_Declare(
-  indicators
-  GIT_REPOSITORY https://github.com/p-ranav/indicators.git
-  GIT_TAG        v2.3
-  GIT_SHALLOW    TRUE
-)
-
-# 设置 indicators 编译选项
-set(INDICATORS_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(INDICATORS_SAMPLES OFF CACHE BOOL "" FORCE)
-
-FetchContent_MakeAvailable(indicators)
-
-# 确保 indicators 头文件可用
-if(TARGET indicators::indicators)
-  set(INDICATORS_TARGET indicators::indicators)
-else()
-  # 如果没有导入目标，创建一个接口目标
-  add_library(indicators_interface INTERFACE)
-  target_include_directories(indicators_interface INTERFACE 
-    ${indicators_SOURCE_DIR}/include)
-  set(INDICATORS_TARGET indicators_interface)
-endif()
 
 # -----------------------------
 # OpenMP（可选；跨平台处理）
@@ -141,7 +114,7 @@ target_include_directories(kernel PRIVATE
   src/cpp/include
 )
 
-target_link_libraries(kernel PRIVATE hwy hwy_contrib ${INDICATORS_TARGET})
+target_link_libraries(kernel PRIVATE hwy hwy_contrib)
 
 # 平台特定的OpenMP处理
 if(OpenMP_CXX_FOUND)

@@ -8,6 +8,9 @@
 #include "mannwhitneyu.hpp"
 #include "progress.hpp"
 
+// 定义 ProgressBar 静态成员
+std::mutex ProgressBar::mu_;
+
 namespace py = pybind11;
 namespace hpdex {
 
@@ -57,8 +60,7 @@ py::tuple call_mwu_numpy(
     const int32_t* gid_ptr = group_id.data();
 
     // 进度条设置
-    std::unique_ptr<ProgressTracker> tracker;
-    std::unique_ptr<ProgressBar> progress_bar;
+    std::unique_ptr<BarWrapper> bar_wrapper;
     size_t* progress_ptr = nullptr;
 
     if (show_progress) {
@@ -66,31 +68,33 @@ py::tuple call_mwu_numpy(
         int actual_threads = threads < 0 ? omp_get_max_threads() : 
                            (threads > omp_get_max_threads() ? omp_get_max_threads() : threads);
         
-        tracker = std::make_unique<ProgressTracker>(actual_threads);
-        progress_ptr = tracker->ptr();
-
-        // 计算各阶段的总量
-        const size_t u_tie_total = C * n_targets;  // 每个(列,目标组)更新一次
-        const size_t p_total = C * n_targets;      // 每个P值计算更新一次
+        // 计算各阶段的工作量
+        const size_t u_tie_total = C * n_targets;  // U统计量和tie校正计算
+        const size_t p_total = C * n_targets;      // P值计算
         
-        // 使用字符串常量避免动态构造问题
+        // 创建多阶段进度条
+        std::vector<ProgressBar> bars;
+        std::vector<size_t> stage_totals;
+        
+        // 阶段1：U统计量计算
         const char* u_tie_name = (!opt.tie_correction && opt.method == MannWhitneyuOption::exact) 
-                                ? "Calc U" : "Calc U&tie";
-        const char* p_name = "Calc P";
+                                ? "Calc U" : "Calc U & tie";
+        bars.emplace_back(u_tie_total, u_tie_name, 0, "it", true);
+        stage_totals.push_back(u_tie_total);
         
-        std::vector<ProgressBar::Stage> stages = {
-            {u_tie_name, u_tie_total},
-            {p_name, p_total}
-        };
-
-        progress_bar = std::make_unique<ProgressBar>(stages, *tracker, 100);
-        progress_bar->start();
+        // 阶段2：P值计算
+        bars.emplace_back(p_total, "Calc P", 0, "it", true);
+        stage_totals.push_back(p_total);
+        
+        bar_wrapper = std::make_unique<BarWrapper>(std::move(bars), std::move(stage_totals), actual_threads);
+        progress_ptr = bar_wrapper->get_progress_ptr();
+        bar_wrapper->start();
     }
 
     auto result = mannwhitneyu<T>(V, gid_ptr, n_targets, opt, threads, progress_ptr);
 
-    if (progress_bar) {
-        progress_bar->stop();
+    if (bar_wrapper) {
+        bar_wrapper->stop();
     }
 
     auto U1_arr = py::array_t<double>(result.U1.size(), result.U1.data());
