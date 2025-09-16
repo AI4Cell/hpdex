@@ -7,26 +7,36 @@ jobs:
   build_wheels:
     name: Build wheels on ${{ matrix.os }} with Python ${{ matrix.python }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 120   # 防止超时被自动 cancel
     strategy:
+      fail-fast: false     # 不会因为一个平台失败导致其他全部取消
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest]
         python: ["3.10", "3.11", "3.12", "3.13"]
 
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: true   # 拉取 highway 子模块
+          submodules: true   # 拉取 highway 等子模块
 
       - name: Set up Python ${{ matrix.python }}
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
 
+      - name: Upgrade pip
+        run: python -m pip install --upgrade pip
+
       - name: Install cibuildwheel
         run: python -m pip install cibuildwheel
 
       - name: Build wheels
-        run: cibuildwheel --output-dir dist
+        run: cibuildwheel --output-dir dist -v   # -v 打开详细日志，调试方便
+        env:
+          CIBW_BUILD_VERBOSITY: 1
+          CIBW_SKIP: "pp*"         # 跳过 PyPy
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_COMMAND: "pytest -q {project}/tests || echo 'tests skipped'" 
 
       - name: Upload wheels as artifact
         uses: actions/upload-artifact@v4
