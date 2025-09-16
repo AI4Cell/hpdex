@@ -7,6 +7,7 @@
 #include "sparse.hpp"
 #include "mannwhitneyu.hpp"
 #include "progress.hpp"
+#include "cstring"
 
 namespace py = pybind11;
 namespace hpdex {
@@ -72,14 +73,15 @@ py::tuple call_mwu_numpy(
         // 计算各阶段的总量
         const size_t u_tie_total = C * n_targets;  // 每个(列,目标组)更新一次
         const size_t p_total = C * n_targets;      // 每个P值计算更新一次
-        std::string u_tie_name("Calc U&tie");
-        if (!opt.tie_correction && opt.method == MannWhitneyuOption::exact) {
-            u_tie_name = std::string("Calc U");
-        }
-        std::string p_name("Calc P");
+        
+        // 使用字符串常量避免动态构造问题
+        const char* u_tie_name = (!opt.tie_correction && opt.method == MannWhitneyuOption::exact) 
+                                ? "Calc U" : "Calc U&tie";
+        const char* p_name = "Calc P";
+        
         std::vector<ProgressBar::Stage> stages = {
-            {u_tie_name, u_tie_total},
-            {p_name, p_total}
+            {u_tie_name, strlen(u_tie_name), u_tie_total},
+            {p_name, strlen(p_name), p_total}
         };
 
         progress_bar = std::make_unique<ProgressBar>(stages, *tracker, 100);
