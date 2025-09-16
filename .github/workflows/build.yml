@@ -17,7 +17,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: true
+          submodules: true   # 拉取子模块（highway 等）
 
       - name: Set up Python ${{ matrix.python }}
         uses: actions/setup-python@v5
@@ -33,8 +33,9 @@ jobs:
       - name: Build wheels
         run: cibuildwheel --output-dir dist
         env:
-          CIBW_BUILD_VERBOSITY: 1
-          CIBW_SKIP: "pp*"
+          CIBW_BUILD_VERBOSITY: 1   # 输出详细日志
+          CIBW_SKIP: "pp*"          # 跳过 PyPy
+          CIBW_TEST_COMMAND: ""     # 禁用测试
 
       - name: Upload wheels as artifact
         uses: actions/upload-artifact@v4
