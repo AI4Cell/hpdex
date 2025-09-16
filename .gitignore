@@ -1,22 +1,106 @@
-# Python-generated files
+# Python 相关
 __pycache__/
-*.py[oc]
-build/
+*.py[co]
+*.pyo
+*.pyd
+*.pyc
+*.pdb
+*.egg
+*.egg-info/
 dist/
+build/
 wheels/
-*.egg-info
+pip-wheel-metadata/
+*.manifest
+*.spec
 
-# Virtual environments
+# 虚拟环境
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
 .venv
 uv.lock
 
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# pytest
 .pytest_cache/
-test/test_data
-test/test_results
+.coverage
+.tox/
+.nox/
+.cache/
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pyre/
+.mypy_cache/
+.dmypy.json
+.pytype/
 
-Lib/
-build/
+# IDE/编辑器
+.vscode/
+.idea/
+*.sublime-workspace
+*.sublime-project
+*.code-workspace
+
+# MacOS
 .DS_Store
-.cache
+.AppleDouble
+.LSOverride
+Icon?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
 
+# C++/CMake/编译相关
 cpp_test/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+Makefile
+CTestTestfile.cmake
+cmake_install.cmake
+*.o
+*.obj
+*.so
+*.dll
+*.dylib
+*.exe
+*.out
+*.a
+*.lib
+*.exp
+*.pdb
+*.mod
+*.ilk
+*.app
+*.stackdump
+*.log
+
+# 测试数据与结果
+test/test_data/
+test/test_results/
+
+# 依赖库
+Lib/
+*.tar.gz
+*.zip
+*.whl
+
+# 临时文件
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+*~
+
+compile_commands.json

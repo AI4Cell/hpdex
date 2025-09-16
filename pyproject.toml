@@ -1,31 +1,46 @@
+[build-system]
+requires = [
+  "scikit-build-core>=0.9",
+  "pybind11>=2.10",
+  "cmake>=3.24",
+  "ninja; platform_system != 'Windows'"
+]
+build-backend = "scikit_build_core.build"
+
 [project]
 name = "hpdex"
-version = "0.2.0"
+version = "1.0.0"
 description = "High-Performance Parallel Differential Expression Analysis for Single-Cell Data"
 readme = "README.md"
 requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [{name = "Your Name", email = "you@example.com"}]
+keywords = ["single-cell", "differential expression", "pybind11", "parallel", "C++"]
+
+# 运行时依赖（按你之前的）
 dependencies = [
-    "numpy>=1.23.5",
-    "scipy>=1.11.0",
-    "numba>=0.58.0",
-    "pandas>=1.5.0",
-    "anndata>=0.8.0",
-    "tqdm>=4.64.0",
-    "pybind11>=3.0.1"
+  "numpy",
+  "scipy",
+  "numba",
+  "pandas",
+  "anndata",
+  "tqdm"
 ]
 
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+[project.optional-dependencies]
+test = [
+  "pytest",
+  "pytest-cov",
+  "scanpy",
+  "psutil",
+  "pdex"
+]
 
-[tool.hatch.build.targets.wheel]
+[tool.scikit-build]
+# 可选：显示声明最低版本（非必须）
+minimum-version = "0.9"
+
+[tool.scikit-build.wheel]
+# 把 src/hpdex 复制进 wheel（纯 Python 文件、.pyi、__init__.py 等）
 packages = ["src/hpdex"]
 
-[dependency-groups]
-test = [
-    "pytest>=7.0.0",
-    "pytest-cov>=4.0.0",
-    "scanpy>=1.9.0",
-    "psutil>=7.0.0",
-    "pdex>=0.1.24"
-]

@@ -3,7 +3,7 @@ import time
 import numpy as np
 from scipy.sparse import csc_matrix
 from scipy import stats
-import hpdex_cpp
+from hpdex.backend import kernel
 
 
 def run_once(n_targets: int, rows_per_group: int, C: int, density: float, seed: int,
@@ -28,7 +28,7 @@ def run_once(n_targets: int, rows_per_group: int, C: int, density: float, seed: 
     A = csc_matrix(dense)
 
     t0 = time.perf_counter()
-    U1_cpp, P_cpp = hpdex_cpp.mannwhitneyu(
+    U1_cpp, P_cpp = kernel.mannwhitneyu(
         A.data.astype(np.float64, copy=False),
         A.indices.astype(np.int64, copy=False),
         A.indptr.astype(np.int64, copy=False),

@@ -1,122 +1,115 @@
 cmake_minimum_required(VERSION 3.18)
 project(hpdex LANGUAGES CXX)
 
-# ===============================
-# 基础
-# ===============================
+# -----------------------------
+# 基础设置
+# -----------------------------
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
 
-# ===============================
+# -----------------------------
 # Python & pybind11
-# ===============================
+# -----------------------------
 find_package(Python REQUIRED COMPONENTS Interpreter Development.Module)
+
+# 通过 pybind11 Python 包获取 CMake config 路径（兼容 pip 安装/多平台）
 execute_process(
-  COMMAND ${Python_EXECUTABLE} -m pybind11 --cmakedir
+  COMMAND ${Python_EXECUTABLE} -c "import pybind11, sys; sys.stdout.write(pybind11.get_cmake_dir())"
   OUTPUT_VARIABLE pybind11_DIR
   OUTPUT_STRIP_TRAILING_WHITESPACE
-  ERROR_QUIET
 )
 if(pybind11_DIR)
-  list(APPEND CMAKE_PREFIX_PATH ${pybind11_DIR})
+  list(APPEND CMAKE_PREFIX_PATH "${pybind11_DIR}")
 endif()
-find_package(pybind11 REQUIRED CONFIG)
+find_package(pybind11 CONFIG REQUIRED)
 
-# ===============================
-# Highway（作为子模块/子目录）
-# ===============================
-set(HIGHWAY_DIR "${CMAKE_SOURCE_DIR}/Lib/highway")
-if(NOT EXISTS ${HIGHWAY_DIR})
+# -----------------------------
+# Highway（作为子目录）
+# -----------------------------
+set(HIGHWAY_DIR "${CMAKE_CURRENT_SOURCE_DIR}/Lib/highway")
+if(NOT EXISTS "${HIGHWAY_DIR}/CMakeLists.txt")
   message(FATAL_ERROR "Highway not found at ${HIGHWAY_DIR}")
 endif()
 set(HWY_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
 set(HWY_ENABLE_EXAMPLES OFF CACHE BOOL "" FORCE)
-add_subdirectory(${HIGHWAY_DIR} highway_build EXCLUDE_FROM_ALL)
+add_subdirectory("${HIGHWAY_DIR}" highway_build EXCLUDE_FROM_ALL)
 
-# ===============================
-# OpenMP（可选）
-# ===============================
+# -----------------------------
+# OpenMP（可选；跨平台处理）
+# -----------------------------
 find_package(OpenMP QUIET)
 
-# ===============================
-# macOS 专项
-# ===============================
-if(APPLE)
-  set(CMAKE_MACOSX_RPATH ON)
-  set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
-  # Python 扩展：避免在链接期解析 Python 符号
-  set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -undefined dynamic_lookup")
-
-  # 尝试 Homebrew libomp（若 find_package 失败）
-  if(NOT OpenMP_CXX_FOUND)
-    foreach(_omp_root "/opt/homebrew/opt/libomp" "/usr/local/opt/libomp")
-      if(EXISTS "${_omp_root}/lib/libomp.dylib")
-        message(STATUS "Using libomp at ${_omp_root}")
-        add_library(omp SHARED IMPORTED)
-        set_target_properties(omp PROPERTIES IMPORTED_LOCATION "${_omp_root}/lib/libomp.dylib")
-        set(OpenMP_CXX_FOUND TRUE)
-        set(_OMP_RPATH "${_omp_root}/lib")
-        include_directories("${_omp_root}/include")
-      endif()
-    endforeach()
-  endif()
+# macOS: 如果没有找到 OpenMP::OpenMP_CXX，尝试 Homebrew libomp 兜底
+if(APPLE AND NOT OpenMP_CXX_FOUND)
+  foreach(_omp_root "/opt/homebrew/opt/libomp" "/usr/local/opt/libomp")
+    if(EXISTS "${_omp_root}/lib/libomp.dylib")
+      message(STATUS "Using fallback libomp at ${_omp_root}")
+      add_library(OpenMP::OpenMP_CXX SHARED IMPORTED)
+      set_target_properties(OpenMP::OpenMP_CXX PROPERTIES
+        IMPORTED_LOCATION "${_omp_root}/lib/libomp.dylib"
+        INTERFACE_INCLUDE_DIRECTORIES "${_omp_root}/include"
+      )
+      set(OpenMP_CXX_FOUND TRUE)
+      set(_OMP_RPATH "${_omp_root}/lib")
+      break()
+    endif()
+  endforeach()
 endif()
 
-# ===============================
-# Python 扩展模块
-# ===============================
-pybind11_add_module(hpdex_cpp
+# -----------------------------
+# pybind11 扩展模块
+#   目标名：kernel
+#   Python 导入路径：hpdex/backend/bin/kernel[.so|.pyd]
+# -----------------------------
+pybind11_add_module(kernel
   src/cpp/module.cpp
   src/cpp/mannwhitneyu.cpp
 )
 
-target_compile_features(hpdex_cpp PRIVATE cxx_std_17)
+target_compile_features(kernel PRIVATE cxx_std_17)
 
-# Release 模式启用 -O3 优化
-target_compile_options(hpdex_cpp PRIVATE $<$<CONFIG:Release>:-O3>)
+if(MSVC)
+  target_compile_options(kernel PRIVATE /O2 /permissive- /EHsc /Zc:preprocessor /bigobj)
+  target_compile_definitions(kernel PRIVATE NOMINMAX)
+else()
+  target_compile_options(kernel PRIVATE -O3)
+  if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    target_compile_options(kernel PRIVATE -Wno-deprecated-declarations)
+  endif()
+endif()
 
-# 你的头文件路径（如有）
-target_include_directories(hpdex_cpp PRIVATE
-  ${CMAKE_SOURCE_DIR}/src/cpp
-  ${CMAKE_SOURCE_DIR}/src/cpp/include
+target_include_directories(kernel PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/cpp/include
 )
 
-# Highway
-target_link_libraries(hpdex_cpp PRIVATE hwy hwy_contrib)
-
-# OpenMP（找到就连）
+target_link_libraries(kernel PRIVATE hwy hwy_contrib)
 if(OpenMP_CXX_FOUND)
-  target_link_libraries(hpdex_cpp PRIVATE OpenMP::OpenMP_CXX)
+  target_link_libraries(kernel PRIVATE OpenMP::OpenMP_CXX)
 endif()
 
-# 给 libomp 配 rpath（macOS）
-if(APPLE AND DEFINED _OMP_RPATH)
-  set_target_properties(hpdex_cpp PROPERTIES
-    BUILD_RPATH "${_OMP_RPATH}"
-    INSTALL_RPATH "${_OMP_RPATH}")
+# macOS: 避免链接期强解析 Python 符号；并给 libomp 设 rpath
+if(APPLE)
+  set_target_properties(kernel PROPERTIES LINK_FLAGS "-undefined dynamic_lookup")
+  if(DEFINED _OMP_RPATH)
+    set_target_properties(kernel PROPERTIES
+      BUILD_RPATH "${_OMP_RPATH}"
+      INSTALL_RPATH "${_OMP_RPATH}"
+    )
+  endif()
 endif()
 
-# ===============================
-# 安装（可选）
-# ===============================
-include(GNUInstallDirs)
-set(PY_INSTALL_DIR "${Python_SITEARCH}")
-if(NOT PY_INSTALL_DIR)
-  set(PY_INSTALL_DIR "${Python_SITELIB}")
-endif()
-if(NOT PY_INSTALL_DIR)
-  set(PY_INSTALL_DIR "${CMAKE_BINARY_DIR}")
-endif()
-message(STATUS "Python install dir: ${PY_INSTALL_DIR}")
-
-install(TARGETS hpdex_cpp
-  LIBRARY DESTINATION ${PY_INSTALL_DIR}
-  ARCHIVE DESTINATION ${PY_INSTALL_DIR}
-  RUNTIME DESTINATION ${PY_INSTALL_DIR}
+# -----------------------------
+# 安装到包内的目标位置（site-packages/hpdex/backend/bin）
+# scikit-build-core 会收集此 install 产物并打进 wheel
+# -----------------------------
+install(TARGETS kernel
+  LIBRARY DESTINATION hpdex/backend/bin      # Unix-like .so
+  RUNTIME DESTINATION hpdex/backend/bin      # Windows .pyd 归类为 RUNTIME
+  ARCHIVE DESTINATION hpdex/backend/bin      # （通常不会用到，但保留以防有 import lib）
 )

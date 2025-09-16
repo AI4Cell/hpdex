@@ -17,7 +17,7 @@ import pandas as pd
 from tqdm import tqdm
 
 # Import core functions from main backend
-from .backen import (_auto_schedule_chunk_size, _compute_fdr,
+from .backend.de_ import (_auto_schedule_chunk_size, _compute_fdr,
                      _compute_fold_changes, _compute_log2_fold_change,
                      _execute_multiprocess_computation,
                      _execute_singlethread_computation)

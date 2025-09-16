@@ -121,7 +121,7 @@ py::array_t<double> call_group_mean_numpy(
         throw std::runtime_error("Unsupported dtype for data");
 
 // ---------------- PyBind ----------------
-PYBIND11_MODULE(hpdex_cpp, m) {
+PYBIND11_MODULE(kernel, m) {
     m.doc() = "HPDEx C++ extension module (MWU + GroupMean, unified interface)";
 
     m.def("mannwhitneyu",

@@ -25,7 +25,7 @@ from scipy.stats import false_discovery_control
 from tqdm import tqdm
 import multiprocessing.shared_memory as shm
 
-from .kernel import rank_sum_chunk_kernel_float, rank_sum_chunk_kernel_hist
+from .pykernel_ import rank_sum_chunk_kernel_float, rank_sum_chunk_kernel_hist
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
