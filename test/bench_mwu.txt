@@ -4,7 +4,7 @@
 --repeats 3
 --use_continuity
 --value_range 0 5000
---density 0.2
+--density 0.4
 --threads 1000
 --alternative two-sided
 --method asymptotic

@@ -17,7 +17,7 @@ _zero_handling_map = {
 _alternative_map = {
     "less": 0,
     "greater": 1,
-    "two_sided": 2,
+    "two-sided": 2,
 }
 _method_map = {
     "exact": 1,
@@ -35,7 +35,7 @@ def mannwhitneyu(
     use_continuity: bool = False,
     fast_norm: bool = False,
     zero_handling: Literal["none", "min", "max", "mix"] = "mix",
-    alternative: Literal["less", "greater", "two_sided"] = "two_sided",
+    alternative: Literal["less", "greater", "two-sided"] = "two-sided",
     method: Literal["exact", "asymptotic"] = "asymptotic",
     threads: int = -1,
     show_progress: bool = False,

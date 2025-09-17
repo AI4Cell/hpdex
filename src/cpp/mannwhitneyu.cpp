@@ -844,12 +844,12 @@ template<class T>
 inline std::pair<std::vector<double>, std::vector<double>>
 mannWhitneyu_core(
     const T* data, const int64_t* indices, const int64_t* indptr,
-    const size_t& R, const size_t& C, const size_t& nnz,
+    const size_t& R, const size_t& C, const size_t& /*nnz*/,
     const int32_t* group_id, size_t n_targets,
     const MannWhitneyuOption& opt, int threads,
     size_t* progress_ptr
 ){
-    if (n_targets == 0) return { {}, {} };
+    if (n_targets == 0) return {{}, {}};
 
     const size_t G = n_targets + 1;
     const size_t Npairs = C * n_targets;
@@ -861,18 +861,22 @@ mannWhitneyu_core(
     std::vector<double> tie_arr(Npairs, 0.0);
     std::vector<double> cc_arr (Npairs, opt.use_continuity ? 0.5 : 0.0);
 
-    // 组行数（用于 sparse 的总样本量）
+    // 预计算各组行数（最大容量上界）
     std::vector<size_t> group_rows(G, 0);
     for (size_t r = 0; r < R; ++r) {
         int g = group_id[r];
-        if (g >= 0 && size_t(g) < G) ++group_rows[size_t(g)];
+        if (g >= 0 && (size_t)g < G) ++group_rows[(size_t)g];
     }
 
-    // 错误标记
+    // 预计算各组在列缓冲中的起始 offset（exclusive prefix sum）
+    std::vector<size_t> group_off(G + 1, 0);
+    for (size_t g = 1; g <= G; ++g) group_off[g] = group_off[g - 1] + group_rows[g - 1];
+    const size_t cap_total = group_off[G]; // = sum(group_rows) ≤ R
+
+    // 错误标记（只记录首个错误）
     std::atomic<bool> has_error{false};
     std::string error_message;
 
-    // ---- 排序派发（把"要不要排"提前成函数指针；列内只调用，不再判分支）
     using SortFn = void(*)(double*, size_t);
     auto sort_impl = +[](double* ptr, size_t n){
         if (n > 1) hwy::HWY_NAMESPACE::VQSortStatic(ptr, n, hwy::SortAscending());
@@ -881,195 +885,179 @@ mannWhitneyu_core(
     SortFn sort_ref = opt.ref_sorted ? sort_noop : sort_impl;
     SortFn sort_tar = opt.tar_sorted ? sort_noop : sort_impl;
 
-    // ---- tie 校正派发（避免每列 if）
     const double tie_mask = opt.tie_correction ? 1.0 : 0.0;
+    const bool zero_at_head = (opt.zero_handling == MannWhitneyuOption::min);
 
-    // ---- 一个小工具：并行跑指定列处理体
-    auto run_cols = [&, threads](auto&& body) {
-        #pragma omp parallel for schedule(static) num_threads(threads)
-        for (std::ptrdiff_t cc = 0; cc < (std::ptrdiff_t)C; ++cc) {
-            const size_t c = (size_t)cc;
-            body(c);
-            progress_ptr[omp_get_thread_num()]++;
-        }
-    };
-
-    // ---- 共享的"收集+排序"封装：每列建 gvals，然后按派发的 sort_ref/sort_tar 排序
-    auto build_and_sort_gvals = [&](size_t c, std::vector<std::vector<double>>& gvals){
-        gvals.assign(G, {});
-        for (size_t g = 0; g < G; ++g) gvals[g].reserve(group_rows[g]);
-
-        const int64_t p0 = indptr[c], p1 = indptr[c + 1];
-        for (int64_t p = p0; p < p1; ++p) {
-            const int64_t r = indices[p];
-            if (r < 0 || size_t(r) >= R) continue;
-            const int g = group_id[size_t(r)];
-            if (g < 0 || size_t(g) >= (int)G) continue;
-            const double v = static_cast<double>(data[p]);
-            if (!is_valid_value(v)) continue;
-            gvals[size_t(g)].push_back(v);
-        }
-        // 排序
-        sort_ref(gvals[0].data(), gvals[0].size());
-        for (size_t g = 1; g < G; ++g)
-            sort_tar(gvals[g].data(), gvals[g].size());
-    };
-
-    // =========================
-    // zero_handling 派发（分支外移），每个分支**内部**并行
-    // =========================
-    switch (opt.zero_handling) {
-    case MannWhitneyuOption::none: {
-        run_cols([&](size_t c){
-            std::vector<std::vector<double>> gvals;
-            build_and_sort_gvals(c, gvals);
-
-            const size_t n1_total = gvals[0].size();
-            if (n1_total < 2) {
-                if (!has_error.exchange(true))
-                    error_message = "Sample too small for reference at column " + std::to_string(c);
-                return;
-            }
-
-            for (size_t g = 1; g < G; ++g) {
-                const size_t n2_total = gvals[g].size();
-                if (n2_total < 2) {
-                    if (!has_error.exchange(true))
-                        error_message = "Sample too small for group " + std::to_string(g) +
-                                        " at column " + std::to_string(c);
-                    continue;
-                }
-
-                double R1 = 0.0, tie_sum = 0.0; bool has_tie = false;
-                merge_rank_sum_with_tie(
-                    gvals[0].data(), gvals[0].size(),
-                    gvals[g].data(), gvals[g].size(),
-                    R1, tie_sum, has_tie
-                );
-
-                const double n1d = static_cast<double>(n1_total);
-                const double U1  = R1 - n1d * (n1d + 1.0) * 0.5;
-
-                const size_t idx = c * n_targets + (g - 1);
-                U1_out[idx]  = U1;
-                n1_arr[idx]  = n1d;
-                n2_arr[idx]  = static_cast<double>(n2_total);
-                tie_arr[idx] = tie_sum * tie_mask;  // 避免 if
-            }
-        });
-    } break;
-
-    case MannWhitneyuOption::min:  // 0 在头
-    case MannWhitneyuOption::max:  // 0 在尾
+    // ======== 并行：每线程一次性分配工作区 ========
+    #pragma omp parallel num_threads(threads)
     {
-        const bool zero_at_head = (opt.zero_handling == MannWhitneyuOption::min);
-        run_cols([&](size_t c){
-            std::vector<std::vector<double>> gvals;
-            build_and_sort_gvals(c, gvals);
+        // 线程本地工作区：cap_total doubles（最多容纳“该列所有组”的非零值）
+        std::vector<double> buf(cap_total);
+        // 各组基址指针
+        std::vector<double*> base(G);
+        for (size_t g = 0; g < G; ++g) base[g] = buf.data() + group_off[g];
+        // 各组已填元素个数（列内复用，循环头清零）
+        std::vector<size_t> cnt(G, 0);
 
-            const size_t n1_total = group_rows[0];
-            if (n1_total < 2) {
-                if (!has_error.exchange(true))
-                    error_message = "Sample too small for reference at column " + std::to_string(c);
-                return;
+        #pragma omp for schedule(static)
+        for (std::ptrdiff_t cc = 0; cc < (std::ptrdiff_t)C; ++cc) {
+            if (has_error.load()) {
+                // 仍推进进度，避免外层“挂起”统计
+                progress_ptr[omp_get_thread_num()]++;
+                continue;
             }
 
-            const size_t a_zero_imp = group_rows[0] - gvals[0].size();
+            // 清零计数器（不擦除数据本体，写到 cnt[g] 范围即可）
+            std::fill(cnt.begin(), cnt.end(), 0);
 
+            // —— 收集该列非零到工作区对应组切片 —— //
+            const int64_t p0 = indptr[cc], p1 = indptr[cc + 1];
+            for (int64_t p = p0; p < p1; ++p) {
+                const int64_t r = indices[p];
+                if (r < 0 || (size_t)r >= R) continue;
+                const int g = group_id[(size_t)r];
+                if (g < 0 || (size_t)g >= G) continue;
+                double v = (double)data[p];
+                if (!is_valid_value(v)) continue;
+                // 写入该组的切片（容量由 group_rows[g] 保证足够）
+                double* dst = base[(size_t)g] + cnt[(size_t)g];
+                *dst = v;
+                ++cnt[(size_t)g];
+            }
+
+            // —— 排序（参考组与目标组分派） —— //
+            if (cnt[0] > 1) sort_ref(base[0], cnt[0]);
             for (size_t g = 1; g < G; ++g) {
-                const size_t n2_total = group_rows[g];
-                if (n2_total < 2) {
+                if (cnt[g] > 1) sort_tar(base[g], cnt[g]);
+            }
+
+            // —— 三种 zero 处理模式 —— //
+            switch (opt.zero_handling) {
+            case MannWhitneyuOption::none: {
+                const size_t n1_total = cnt[0];
+                if (n1_total < 2) {
                     if (!has_error.exchange(true))
-                        error_message = "Sample too small for group " + std::to_string(g) +
-                                        " at column " + std::to_string(c);
-                    continue;
+                        error_message = "Sample too small for reference at column " + std::to_string(cc);
+                    break;
                 }
-                const size_t b_zero_imp = group_rows[g] - gvals[g].size();
+                const double n1d = (double)n1_total;
 
-                double R1 = 0.0, tie_sum = 0.0; bool has_tie = false;
-                merge_rank_sum_with_tie_zero_extreme(
-                    gvals[0].data(), gvals[0].size(),
-                    gvals[g].data(), gvals[g].size(),
-                    a_zero_imp, b_zero_imp,
-                    /*zero_at_head=*/zero_at_head,
-                    R1, tie_sum, has_tie
-                );
+                for (size_t g = 1; g < G; ++g) {
+                    const size_t n2_total = cnt[g];
+                    if (n2_total < 2) {
+                        if (!has_error.exchange(true))
+                            error_message = "Sample too small for group " + std::to_string(g) +
+                                            " at column " + std::to_string(cc);
+                        continue;
+                    }
+                    double R1 = 0.0, tie_sum = 0.0; bool has_tie_local = false;
+                    merge_rank_sum_with_tie(
+                        base[0], cnt[0], base[g], cnt[g],
+                        R1, tie_sum, has_tie_local
+                    );
 
-                const double n1d = static_cast<double>(n1_total);
-                const double U1  = R1 - n1d * (n1d + 1.0) * 0.5;
+                    const size_t idx = (size_t)cc * n_targets + (g - 1);
+                    U1_out[idx]  = R1 - n1d * (n1d + 1.0) * 0.5;
+                    n1_arr[idx]  = n1d;
+                    n2_arr[idx]  = (double)n2_total;
+                    tie_arr[idx] = tie_sum * tie_mask;
+                }
+            } break;
 
-                const size_t idx = c * n_targets + (g - 1);
-                U1_out[idx]  = U1;
-                n1_arr[idx]  = n1d;
-                n2_arr[idx]  = static_cast<double>(n2_total);
-                tie_arr[idx] = tie_sum * tie_mask;
-            }
-        });
-    } break;
-
-    case MannWhitneyuOption::mix: { // 负段 | 零段 | 正段
-        run_cols([&](size_t c){
-            std::vector<std::vector<double>> gvals;
-            build_and_sort_gvals(c, gvals);
-
-            const size_t n1_total = group_rows[0];
-            if (n1_total < 2) {
-                if (!has_error.exchange(true))
-                    error_message = "Sample too small for reference at column " + std::to_string(c);
-                return;
-            }
-            const size_t a_zero_imp = group_rows[0] - gvals[0].size();
-
-            for (size_t g = 1; g < G; ++g) {
-                const size_t n2_total = group_rows[g];
-                if (n2_total < 2) {
+            case MannWhitneyuOption::min: // 0 置于头
+            case MannWhitneyuOption::max: // 0 置于尾
+            {
+                const size_t n1_total = group_rows[0];
+                if (n1_total < 2) {
                     if (!has_error.exchange(true))
-                        error_message = "Sample too small for group " + std::to_string(g) +
-                                        " at column " + std::to_string(c);
-                    continue;
+                        error_message = "Sample too small for reference at column " + std::to_string(cc);
+                    break;
                 }
-                const size_t b_zero_imp = group_rows[g] - gvals[g].size();
+                const size_t a_zero_imp = group_rows[0] - cnt[0];
 
-                double R1 = 0.0, tie_sum = 0.0; bool has_tie = false;
-                merge_rank_sum_with_tie_include_zeros(
-                    gvals[0].data(), gvals[0].size(),
-                    gvals[g].data(), gvals[g].size(),
-                    a_zero_imp, b_zero_imp,
-                    R1, tie_sum, has_tie
-                );
+                for (size_t g = 1; g < G; ++g) {
+                    const size_t n2_total = group_rows[g];
+                    if (n2_total < 2) {
+                        if (!has_error.exchange(true))
+                            error_message = "Sample too small for group " + std::to_string(g) +
+                                            " at column " + std::to_string(cc);
+                        continue;
+                    }
+                    const size_t b_zero_imp = group_rows[g] - cnt[g];
 
-                const double n1d = static_cast<double>(n1_total);
-                const double U1  = R1 - n1d * (n1d + 1.0) * 0.5;
+                    double R1 = 0.0, tie_sum = 0.0; bool has_tie_local = false;
+                    merge_rank_sum_with_tie_zero_extreme(
+                        base[0], cnt[0], base[g], cnt[g],
+                        a_zero_imp, b_zero_imp,
+                        /*zero_at_head=*/zero_at_head,
+                        R1, tie_sum, has_tie_local
+                    );
 
-                const size_t idx = c * n_targets + (g - 1);
-                U1_out[idx]  = U1;
-                n1_arr[idx]  = n1d;
-                n2_arr[idx]  = static_cast<double>(n2_total);
-                tie_arr[idx] = tie_sum * tie_mask;
+                    const double n1d = (double)n1_total;
+                    const size_t idx = (size_t)cc * n_targets + (g - 1);
+                    U1_out[idx]  = R1 - n1d * (n1d + 1.0) * 0.5;
+                    n1_arr[idx]  = n1d;
+                    n2_arr[idx]  = (double)n2_total;
+                    tie_arr[idx] = tie_sum * tie_mask;
+                }
+            } break;
+
+            case MannWhitneyuOption::mix: { // 负|零|正
+                const size_t n1_total = group_rows[0];
+                if (n1_total < 2) {
+                    if (!has_error.exchange(true))
+                        error_message = "Sample too small for reference at column " + std::to_string(cc);
+                    break;
+                }
+                const size_t a_zero_imp = group_rows[0] - cnt[0];
+
+                for (size_t g = 1; g < G; ++g) {
+                    const size_t n2_total = group_rows[g];
+                    if (n2_total < 2) {
+                        if (!has_error.exchange(true))
+                            error_message = "Sample too small for group " + std::to_string(g) +
+                                            " at column " + std::to_string(cc);
+                        continue;
+                    }
+                    const size_t b_zero_imp = group_rows[g] - cnt[g];
+
+                    double R1 = 0.0, tie_sum = 0.0; bool has_tie_local = false;
+                    merge_rank_sum_with_tie_include_zeros(
+                        base[0], cnt[0], base[g], cnt[g],
+                        a_zero_imp, b_zero_imp,
+                        R1, tie_sum, has_tie_local
+                    );
+
+                    const double n1d = (double)n1_total;
+                    const size_t idx = (size_t)cc * n_targets + (g - 1);
+                    U1_out[idx]  = R1 - n1d * (n1d + 1.0) * 0.5;
+                    n1_arr[idx]  = n1d;
+                    n2_arr[idx]  = (double)n2_total;
+                    tie_arr[idx] = tie_sum * tie_mask;
+                }
+            } break;
             }
-        });
-    } break;
-    }
+
+            progress_ptr[omp_get_thread_num()]++;
+        } // for columns
+    } // omp parallel
 
     if (has_error.load()) throw std::runtime_error(error_message);
 
-    // ---- p 值：这里已无列循环内分支，方法分支也已经在函数粒度（成本低）
+    // p 值计算（与原逻辑相同）
     if (opt.method == MannWhitneyuOption::asymptotic) {
         p_asymptotic_parallel(
             U1_out.data(), n1_arr.data(), n2_arr.data(),
             tie_arr.data(), cc_arr.data(),
             P_out.data(), Npairs,
-            opt.alternative,
-            opt.fast_norm,
-            threads,
-            progress_ptr
+            opt.alternative, opt.fast_norm,
+            threads, progress_ptr
         );
     } else {
         p_exact_parallel(
             U1_out.data(), n1_arr.data(), n2_arr.data(),
             P_out.data(), Npairs,
-            opt.alternative, threads,
-            progress_ptr
+            opt.alternative, threads, progress_ptr
         );
     }
 
