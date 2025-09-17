@@ -26,13 +26,25 @@
 
 #if defined(_MSC_VER)
   #define malloc_aligned_(ptr, size) \
-    do { ptr = static_cast<void*>(_aligned_malloc((size), HPDEXC_ALIGN_SIZE)); } while(0)
+    do { ptr = static_cast<void*>(_aligned_malloc((size), ALIGN_SIZE)); } while(0)
   #define free_aligned_(ptr) \
     do { _aligned_free((ptr)); } while(0)
 #else
   #define malloc_aligned_(ptr, size) \
-    do { if (posix_memalign(&(ptr), HPDEXC_ALIGN_SIZE, (size)) != 0) ptr = nullptr; } while(0)
+    do { if (posix_memalign(&(ptr), ALIGN_SIZE, (size)) != 0) ptr = nullptr; } while(0)
   #define free_aligned_(ptr) \
+    do { free((ptr)); } while(0)
+#endif
+
+#if defined(_MSC_VER)
+  #define malloc_aligned_custom_(ptr, size, align) \
+    do { ptr = static_cast<void*>(_aligned_malloc((size), (align))); } while(0)
+  #define free_aligned_custom_(ptr) \
+    do { _aligned_free((ptr)); } while(0)
+#else
+  #define malloc_aligned_custom_(ptr, size, align) \
+    do { if (posix_memalign(&(ptr), (align), (size)) != 0) ptr = nullptr; } while(0)
+  #define free_aligned_custom_(ptr) \
     do { free((ptr)); } while(0)
 #endif
 

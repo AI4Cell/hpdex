@@ -8,7 +8,12 @@
 #include <atomic>
 #include <cmath>
 #include <cstddef>
+#include <cstdlib>
+#include <new>
 #include <string>
+#ifndef _MSC_VER
+ #include <cstdlib>  // for posix_memalign on Unix systems
+#endif
 
 namespace hpdex {
 
@@ -118,8 +123,17 @@ force_inline_ double p_exact(double U, size_t n1, size_t n2) {
         dp  = dp_stack;
         ndp = ndp_stack;
     } else {
-        dp  = static_cast<U64*>(::operator new[](SZ * sizeof(U64), std::align_val_t(64)));
-        ndp = static_cast<U64*>(::operator new[](SZ * sizeof(U64), std::align_val_t(64)));
+        void* dp_raw  = nullptr;
+        void* ndp_raw = nullptr;
+        malloc_aligned_custom_(dp_raw,  SZ * sizeof(U64), 64);
+        malloc_aligned_custom_(ndp_raw, SZ * sizeof(U64), 64);
+        if unlikely_(!dp_raw || !ndp_raw) {
+            if (dp_raw)  free_aligned_custom_(dp_raw);
+            if (ndp_raw) free_aligned_custom_(ndp_raw);
+            throw std::bad_alloc();
+        }
+        dp  = static_cast<U64*>(dp_raw);
+        ndp = static_cast<U64*>(ndp_raw);
         on_heap = true;
     }
 
@@ -180,8 +194,8 @@ force_inline_ double p_exact(double U, size_t n1, size_t n2) {
 
     // 释放堆内存
     if (on_heap) {
-        ::operator delete[](dp,  std::align_val_t(64));
-        ::operator delete[](ndp, std::align_val_t(64));
+        free_aligned_custom_(dp);
+        free_aligned_custom_(ndp);
     }
 
     return sf_ge;
