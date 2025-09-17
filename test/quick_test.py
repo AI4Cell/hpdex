@@ -38,7 +38,6 @@ def test_mannwhitneyu():
 
     du = np.max(np.abs(U1_cpp - U1_sp))
     dp = np.max(np.abs(P_cpp - P_sp))
-    print(f"mannwhitneyu dU={du:.2e}, dP={dp:.2e}")
     assert du < 1e-8
     assert dp < 1e-6
 
@@ -63,7 +62,6 @@ def test_group_mean():
 
     dref = np.max(np.abs(means[0] - ref_mean))
     dtar = np.max(np.abs(means[1] - tar_mean))
-    print(f"group_mean dref={dref:.2e}, dtar={dtar:.2e}")
     assert dref < 1e-6
     assert dtar < 1e-6
 
@@ -71,4 +69,3 @@ def test_group_mean():
 if __name__ == "__main__":
     test_mannwhitneyu()
     test_group_mean()
-    print("✅ quick test passed")
