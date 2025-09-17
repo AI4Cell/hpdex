@@ -47,12 +47,11 @@ add_subdirectory("${HIGHWAY_DIR}" highway_build EXCLUDE_FROM_ALL)
 # -----------------------------
 find_package(OpenMP QUIET)
 
-# macOS: 使用动态链接并将 libomp.dylib 打包到 wheel 中
+# macOS: 如果没有找到 OpenMP::OpenMP_CXX，尝试 Homebrew libomp 兜底
 if(APPLE AND NOT OpenMP_CXX_FOUND)
   foreach(_omp_root "/opt/homebrew/opt/libomp" "/usr/local/opt/libomp")
-    # 检查动态库是否存在
     if(EXISTS "${_omp_root}/lib/libomp.dylib")
-      message(STATUS "Found libomp at ${_omp_root}, will bundle dylib with wheel")
+      message(STATUS "Using fallback libomp at ${_omp_root}")
       add_library(OpenMP::OpenMP_CXX SHARED IMPORTED)
       
       # 检查编译器是否支持-fopenmp标志
@@ -80,8 +79,7 @@ if(APPLE AND NOT OpenMP_CXX_FOUND)
         INTERFACE_LINK_OPTIONS "${_omp_link_flags}"
       )
       set(OpenMP_CXX_FOUND TRUE)
-      set(_OMP_LIB_PATH "${_omp_root}/lib/libomp.dylib")
-      set(_OMP_BUNDLE_DYLIB TRUE)
+      set(_OMP_RPATH "${_omp_root}/lib")
       break()
     endif()
   endforeach()
@@ -124,18 +122,9 @@ if(OpenMP_CXX_FOUND)
   
   # 根据平台选择正确的编译标志
   if(APPLE)
-    # macOS: 动态链接并打包 dylib
+    # macOS: 不手动添加编译标志，OpenMP::OpenMP_CXX目标会自动处理
     target_compile_definitions(kernel PRIVATE _OPENMP)
-    if(DEFINED _OMP_BUNDLE_DYLIB)
-      message(STATUS "OpenMP enabled for macOS (bundled dylib)")
-      # 设置 rpath 指向 @loader_path，即与 .so 同目录
-      set_target_properties(kernel PROPERTIES
-        INSTALL_RPATH "@loader_path"
-        BUILD_WITH_INSTALL_RPATH TRUE
-      )
-    else()
-      message(STATUS "OpenMP enabled for macOS (system linking)")
-    endif()
+    message(STATUS "OpenMP enabled for macOS")
   elseif(WIN32)
     # Windows: MSVC的OpenMP支持
     target_compile_definitions(kernel PRIVATE _OPENMP)
@@ -150,16 +139,13 @@ else()
   target_compile_definitions(kernel PRIVATE NO_OPENMP)
 endif()
 
-# macOS: 避免链接期强解析 Python 符号
+# macOS: 避免链接期强解析 Python 符号；并给 libomp 设 rpath
 if(APPLE)
   set_target_properties(kernel PROPERTIES LINK_FLAGS "-undefined dynamic_lookup")
-  
-  # 将 libomp.dylib 安装到与 kernel.so 同目录（用于打包）
-  if(DEFINED _OMP_BUNDLE_DYLIB AND EXISTS "${_OMP_LIB_PATH}")
-    message(STATUS "Will install libomp.dylib to wheel for bundling")
-    install(FILES "${_OMP_LIB_PATH}"
-      DESTINATION hpdex/backend/bin
-      COMPONENT Libraries
+  if(DEFINED _OMP_RPATH)
+    set_target_properties(kernel PROPERTIES
+      BUILD_RPATH "${_OMP_RPATH}"
+      INSTALL_RPATH "${_OMP_RPATH}"
     )
   endif()
 endif()
