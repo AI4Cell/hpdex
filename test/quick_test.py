@@ -63,7 +63,7 @@ def test_group_mean():
 
     dref = np.max(np.abs(means[0] - ref_mean))
     dtar = np.max(np.abs(means[1] - tar_mean))
-    print(f"group_mean Δref={dref:.2e}, Δtar={dtar:.2e}")
+    print(f"group_mean dref={dref:.2e}, dtar={dtar:.2e}")
     assert dref < 1e-6
     assert dtar < 1e-6
 
