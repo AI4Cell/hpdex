@@ -99,12 +99,18 @@ public:
           width_(width == 0 ? std::max<size_t>(10, calculate_bar_width(desc, unit) - 10) : std::max<size_t>(1, width)),
           unit_(unit),
           use_unicode_(use_unicode),
-          start_time_(std::chrono::steady_clock::now()) {}
+          start_time_(std::chrono::steady_clock::time_point::min()) {} // 使用最小时间点表示未开始
 
     void update(size_t current) {
         if (current > total_) current = total_;
 
         auto now = std::chrono::steady_clock::now();
+        
+        // 如果是第一次更新，设置开始时间
+        if (start_time_ == std::chrono::steady_clock::time_point::min()) {
+            start_time_ = now;
+        }
+        
         double elapsed = std::chrono::duration_cast<std::chrono::duration<double>>(now - start_time_).count();
         if (elapsed < 1e-9) elapsed = 1e-9;
 
@@ -174,13 +180,19 @@ public:
     // 直接完成进度条
     inline void complete() {
         completed = true;
+        
+        // 如果任务完成太快，还没有开始计时，设置最小时间（100ms）
+        if (start_time_ == std::chrono::steady_clock::time_point::min()) {
+            start_time_ = std::chrono::steady_clock::now() - std::chrono::milliseconds(100);
+        }
+        
         update(total_);
         std::cout << std::endl;
     }
 
     // 重置开始时间（用于多阶段进度条）
     inline void reset_start_time() {
-        start_time_ = std::chrono::steady_clock::now();
+        start_time_ = std::chrono::steady_clock::time_point::min(); // 重置为未开始状态
     }
 
     inline bool is_completed() const { return completed; }
@@ -256,11 +268,6 @@ public:
         stop_flag_ = false;
         current_stage_ = 0;
         cumulative_total_ = 0;
-        
-        // 重置第一个进度条的开始时间
-        if (!bars_.empty()) {
-            bars_[0].reset_start_time();
-        }
         
         update_thread_ = std::thread([this, time_interval]() {
             while (!stop_flag_ && current_stage_ < bars_.size()) {
