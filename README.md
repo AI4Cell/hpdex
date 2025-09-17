@@ -57,10 +57,9 @@ pip install hpdex
 ### From source
 
 ```bash
-git clone https://github.com/AI4Cell/hpdex.git
+git clone --recurse-submodules https://github.com/AI4Cell/hpdex.git # for highway submodule
 cd hpdex
 pip install -e .
-# or: uv sync
 ```
 
 <details>
