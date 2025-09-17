@@ -38,7 +38,7 @@ def test_mannwhitneyu():
 
     du = np.max(np.abs(U1_cpp - U1_sp))
     dp = np.max(np.abs(P_cpp - P_sp))
-    print(f"mannwhitneyu Δu={du:.2e}, Δp={dp:.2e}")
+    print(f"mannwhitneyu dU={du:.2e}, dP={dp:.2e}")
     assert du < 1e-8
     assert dp < 1e-6
 

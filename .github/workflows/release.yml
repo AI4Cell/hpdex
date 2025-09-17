@@ -26,6 +26,10 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install OpenMP on macOS
+        if: runner.os == 'macOS'
+        run: brew install libomp
+
       - name: Upgrade pip & install cibuildwheel
         run: |
           python -m pip install --upgrade pip
