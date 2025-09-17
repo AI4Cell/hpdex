@@ -68,10 +68,6 @@ jobs:
         with:
           name: wheels-windows-latest
           path: dist/windows
-      - uses: actions/download-artifact@v4
-        with:
-          name: wheels-macos-latest
-          path: dist/macos
 
       - name: Merge all wheels
         run: mkdir dist/all && cp dist/linux/* dist/windows/* dist/macos/* dist/all/
