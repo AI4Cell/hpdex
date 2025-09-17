@@ -88,6 +88,7 @@ def group_mean(
     n_groups: int,
     include_zeros: bool = True,
     threads: int = -1,
+    use_kahan: bool = False,
     layout: Literal["csc", "csr"] = "csc",
 ) -> np.ndarray:
     """
@@ -109,6 +110,8 @@ def group_mean(
         Whether to treat missing entries as explicit zeros.
     threads : int
         Number of threads (-1 = use all available).
+    use_kahan : bool, default=False
+        Whether to use Kahan summation.
     layout : {"csc", "csr"}
         Input sparse layout.
 

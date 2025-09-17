@@ -2,13 +2,14 @@
 
 <h1>hpdex</h1>
 
-<p><em>High‑performance differential expression analysis for single‑cell data</em></p>
+<p><em>High-performance differential expression analysis for single-cell data</em></p>
 
 <p>
   <a href="https://pypi.org/project/hpdex/"><img src="https://img.shields.io/pypi/v/hpdex.svg?color=blue" alt="PyPI version" /></a>
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.10%2B-blue.svg" alt="Python 3.10+" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT License" /></a>
   <img src="https://img.shields.io/badge/status-stable-brightgreen" alt="Status: stable" />
+  <img src="https://img.shields.io/badge/backend-C%2B%2B%20%2B%20multithreaded-1f6feb" alt="C++ backend" />
 </p>
 
 <p>
@@ -17,7 +18,7 @@
   <a href="#-quick-start">Quick Start</a> ·
   <a href="#-api-reference">API</a> ·
   <a href="#-statistical-kernels">Kernels</a> ·
-  <a href="#-testing">Testing</a> ·
+  <a href="#-benchmarks">Benchmarks</a> ·
   <a href="#-faq">FAQ</a> ·
   <a href="#-license">License</a>
 </p>
@@ -28,20 +29,20 @@
 
 ## 🔎 Overview
 
-**hpdex** provides efficient differential expression (DE) analysis for single‑cell data using **multiprocessing** and an optimized **Mann–Whitney U** implementation. It is now available on [PyPI](https://pypi.org/project/hpdex/) and aims to be *statistically consistent* with `scipy.stats.mannwhitneyu` while scaling to large datasets.
+**hpdex** now ships a **C++ backend** with careful memory layout and **true multithreading**, delivering large speedups for Mann–Whitney U–based DE on single-cell matrices:
 
-<table>
-  <tr>
-    <td>⚡️ <strong>Fast</strong><br/><small>Batch processing & shared memory minimize copies.</small></td>
-    <td>🧠 <strong>Accurate</strong><br/><small>Tie‑aware U statistics; normal approximation for large <i>n</i>.</small></td>
-    <td>🧰 <strong>Versatile</strong><br/><small>Float & histogram kernels auto‑selected by data type.</small></td>
-  </tr>
-  <tr>
-    <td>🧵 <strong>Parallel</strong><br/><small>Simple <code>num_workers</code> control.</small></td>
-    <td>💾 <strong>Memory‑savvy</strong><br/><small>Reuses pre‑sorted references across comparisons.</small></td>
-    <td>📊 <strong>Streaming</strong><br/><small>Handles datasets larger than RAM via chunking.</small></td>
-  </tr>
-</table>
+* ⚡ **Sparse CSC**: in DE scenarios (gene × group pairs), the **pure Mann–Whitney U kernel** is often **hundreds of times faster** than SciPy when multi-threaded.
+* 🧩 **End-to-end DE** (`parallel_differential_expression`): with scheduling and reuse, typical pipelines are **2–3 orders of magnitude faster** than pdex-style Python loops.
+* 📦 **Dense**: even single-thread is commonly **\~3× faster** than SciPy on dense inputs; multi-thread scales further.
+* 📈 **Statistical parity**: tie-aware U, continuity correction, and asymptotic p-values match `scipy.stats.mannwhitneyu` under equivalent settings (within float tolerance).
+
+Key capabilities:
+
+* 🧵 C++ multithreading, per-thread workspaces, low allocator pressure
+* 🧮 Float & histogram kernels (auto-selected by data type)
+* 🧠 Tie & continuity corrections; exact or asymptotic p-values in backend
+* 🧱 Robust sparse support (CSC highly recommended)
+* 🧰 Drop-in friendly design & clean Python API
 
 ---
 
@@ -53,27 +54,21 @@
 pip install hpdex
 ```
 
-### From source (uv)
-
-```bash
-git clone https://github.com/AI4Cell/hpdex.git
-cd hpdex
-uv sync
-```
-
-### From source (pip)
+### From source
 
 ```bash
 git clone https://github.com/AI4Cell/hpdex.git
 cd hpdex
 pip install -e .
+# or: uv sync
 ```
 
 <details>
 <summary><strong>Requirements</strong></summary>
 
 * Python ≥ 3.10
-* <code>numpy</code>, <code>scipy</code>, <code>numba</code>, <code>pandas</code>, <code>anndata</code>, <code>tqdm</code>
+* <code>numpy</code>, <code>scipy</code>, <code>pandas</code>, <code>anndata</code>, <code>tqdm</code>
+* Building from source requires a C++17 compiler; OpenMP recommended for threading
 
 </details>
 
@@ -85,31 +80,32 @@ pip install -e .
 import anndata as ad
 from hpdex import parallel_differential_expression
 
-# Load your data
 adata = ad.read_h5ad("data.h5ad")
 
-# Run differential expression analysis
-results = parallel_differential_expression(
+df = parallel_differential_expression(
     adata,
     groupby_key="perturbation",
     reference="control",
-    num_workers=4,
+    threads=8,                 # C++ multithreading
+    tie_correction=True,
+    use_continuity=True,       # continuity correction for U -> Z
+    show_progress=True,
 )
 
-# Save results
-results.to_csv("de_results.csv", index=False)
+df.to_csv("de_results.csv", index=False)
 ```
 
-**Output schema** (DataFrame columns):
+**Output schema** (DataFrame):
 
-| column             | description                              |
-| ------------------ | ---------------------------------------- |
-| `target`           | target group name                        |
-| `feature`          | gene / feature id                        |
-| `p_value`          | (two‑sided) p‑value from Mann–Whitney U  |
-| `fold_change`      | mean(target) / mean(reference)           |
-| `log2_fold_change` | `log2(fold_change)`                      |
-| `fdr`              | BH‑adjusted p‑value (Benjamini–Hochberg) |
+| column             | description                           |
+| ------------------ | ------------------------------------- |
+| `target`           | target group name                     |
+| `feature`          | gene / feature id                     |
+| `p_value`          | two-sided p-value from Mann–Whitney U |
+| `u_statistic`      | U₁ statistic (reference vs target)    |
+| `fold_change`      | mean(target) / mean(reference)        |
+| `log2_fold_change` | `log2(fold_change)`                   |
+| `fdr`              | BH-adjusted p-value                   |
 
 ---
 
@@ -117,93 +113,96 @@ results.to_csv("de_results.csv", index=False)
 
 ### `parallel_differential_expression`
 
-Main entry for DE analysis.
-
 ```python
 parallel_differential_expression(
     adata: ad.AnnData,
     groupby_key: str,
-    reference: str,
-    groups: Optional[List[str]] = None,
-    metric: str = "wilcoxon",
+    reference: str | None,          # None -> treated as "non-targeting" baseline
+    groups: list[str] | None = None,
+    metric: str = "wilcoxon",       # currently only "wilcoxon" (Mann–Whitney U)
     tie_correction: bool = True,
-    continuity_correction: bool = True,
-    use_asymptotic: Optional[bool] = None,
+    use_continuity: bool = True,
     min_samples: int = 2,
-    max_bins: int = 100_000,
-    prefer_hist_if_int: bool = False,
-    num_workers: int = 1,
+    threads: int = -1,              # -1 -> use all logical cores
     clip_value: float = 20.0,
+    show_progress: bool = True,
 ) -> pd.DataFrame
 ```
 
-**Parameters**
+**Notes**
 
-* `adata` — `AnnData` object containing expression matrix & metadata
-* `groupby_key` — column in `adata.obs` for grouping
-* `reference` — reference group name (e.g., "control")
-* `groups` — optional subset of target groups (auto if `None`)
-* `metric` — currently `"wilcoxon"` (Mann–Whitney U)
-* `tie_correction` — whether to apply tie correction
-* `continuity_correction` — whether to apply continuity correction
-* `use_asymptotic` — whether to use asymptotic approximation
-* `min_samples` — minimum number of samples per group
-* `max_bins` — maximum number of bins for histogram algorithm
-* `prefer_hist_if_int` — prefer histogram algorithm for integer data
-* `num_workers` — number of worker processes
-* `clip_value` — clip fold change if infinite or NaN
+* `threads` controls the **C++ backend** concurrency.
+* `reference=None` creates a “non-targeting” baseline for missing labels.
+* Internally the matrix is converted to **CSC** (`scipy.sparse.csc_matrix`) for best performance.
+* The backend currently defaults to **zero-handling = "min"** (zeros at head), suitable for UMI counts.
 
-> 💡 **Tips**
->
-> * For UMI counts, set `prefer_hist_if_int=True` to favor the histogram kernel.
-> * Very large samples may produce extremely small `p_value`s due to underflow; rely on `fdr` for decisions.
+### Low-level backend (advanced)
 
-**Returns** — `pd.DataFrame` (see *Output schema* above)
+```python
+from hpdex.backend import mannwhitneyu, group_mean
+
+U1, P = mannwhitneyu(
+    matrix_csc,           # scipy.sparse.csc_matrix or ndarray (dense handled internally)
+    group_id_int32,       # shape: (n_cells,), 0=reference, 1..G-1=targets, -1=ignored
+    n_targets: int,
+    ref_sorted=False,     # set True if your ref slice is already sorted
+    tar_sorted=False,     # set True if target slices are sorted
+    use_continuity=True,
+    tie_correction=True,
+    zero_handling="min",  # "none" | "min" | "max" | "mix"
+    threads=-1,
+    show_progress=False,
+)
+
+means = group_mean(
+    matrix_csc,
+    group_id_int32,
+    G,                    # total groups (reference + targets)
+    include_zeros=True,
+    threads=-1,
+)  # returns array shape: (G, n_genes)
+```
 
 ---
 
 ## 🧪 Statistical Kernels
 
-hpdex implements two complementary kernels and auto‑selects by data type.
+**Float kernel**
 
-### Float Kernel
+* Merge-rank U with tie tracking; contiguous slices; vector-friendly
+* Memory: `O(n)` per slice; scales well with threads
 
-* **Use**: continuous expression (e.g., log‑counts)
-* **Alg**: merge‑rank computation for U; Numba JIT; vectorized batches
-* **Mem**: `O(n)` working memory for sorted arrays
+**Histogram kernel**
 
-### Histogram Kernel
+* For integer/UMI counts with limited range
+* Bucketized ranks reduce sorting; memory `O(bins)` (≪ n)
 
-* **Use**: integer/discrete counts (e.g., UMI)
-* **Alg**: bucketized rank computation; reduces sorting overhead
-* **Mem**: `O(bins)` working memory, typically ≪ data size
+**Common**
 
-**Common features**
+* Exact/asymptotic p-values in backend
+* Tie & continuity corrections
+* Batch-wise scheduling across (gene × group)
 
-* Proper **tie handling** and variance correction
-* **Asymptotic normal** approximation for large samples
-* **Batching** across gene × group pairs
-* **Reference re‑use** to save sorting cost
+---
 
-> The kernels aim to match `scipy.stats.mannwhitneyu` numerically under equivalent settings.
+## 📈 Benchmarks
+
+Typical observations (indicative; varies by CPU, threads, sparsity):
+
+| Scenario                                 | Matrix   | Speedup vs SciPy |
+| ---------------------------------------- | -------- | ---------------- |
+| **Dense** single-thread U per gene       | dense    | \~3×             |
+| **Sparse** multi-thread U (DE setting)   | CSC, 64T | 100×–300×        |
+| **End-to-end DE** vs pdex-style baseline | CSC, 64T | 10²–10³×         |
+
+**Why fast?** Thread-local workspaces (no per-column allocations), cache-friendly slices, zero-aware rank merge, and reduced Python overhead.
 
 ---
 
 ## 🧷 Testing
 
-See **[test/README.md](test/README.md)** for full docs.
-
-**Quick test**
-
 ```bash
-cd test
-python test.py config_quick.yml
-```
-
-**Full suite**
-
-```bash
-python test.py config.yml
+cd test && cat bench_mwu.txt | xargs python bench_mwu.py
 ```
 
 ---
@@ -211,28 +210,28 @@ python test.py config.yml
 ## ❓ FAQ
 
 <details>
-<summary><strong>Does hpdex correct for multiple testing?</strong></summary>
-Yes. The returned <code>fdr</code> column applies Benjamini–Hochberg (BH) adjustment to the raw <code>p_value</code>s.
+<summary><strong>Do you correct for multiple testing?</strong></summary>
+Yes. The output <code>fdr</code> applies Benjamini–Hochberg (BH).
 </details>
 
 <details>
-<summary><strong>Why do I see extremely small <code>p_value</code>s (close to 0)?</strong></summary>
-For very large samples and strong effects, underflow can make values effectively <code>0.0</code> in float precision. This is expected; rely on <code>fdr</code> for decision making.
+<summary><strong>Why are p-values sometimes ~0?</strong></summary>
+Very large samples and strong effects can underflow in float. This is expected; prefer <code>fdr</code> for decisions.
 </details>
 
 <details>
-<summary><strong>When should I prefer the Histogram kernel?</strong></summary>
-When the data are integer UMI counts with limited range. It avoids full sorting per target and is usually faster and more memory‑efficient.
+<summary><strong>How are zeros handled?</strong></summary>
+Backend supports <code>"none"</code>, <code>"min"</code>, <code>"max"</code>, <code>"mix"</code>. The high-level API currently uses <code>"min"</code> by default, which is suitable for UMI counts.
 </details>
 
 ---
 
 ## 📄 License
 
-MIT License — see [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE).
 
 ---
 
 <div align="center">
-  <sub>Built for large‑scale single‑cell perturbation analysis. Now available on <a href="https://pypi.org/project/hpdex/">PyPI</a>.</sub>
+  <sub>Built for large-scale single-cell perturbation analysis, now powered by a C++ backend.</sub>
 </div>

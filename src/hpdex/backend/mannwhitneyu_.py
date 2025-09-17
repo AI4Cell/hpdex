@@ -91,6 +91,7 @@ def group_mean(
     group_id: np.ndarray,
     n_groups: int,
     include_zeros: bool = True,
+    use_kahan: bool = False,
     threads: int = -1,
 ) -> np.ndarray:
     """Compute group-wise mean for each feature (sparse CSR/CSC)."""
@@ -121,5 +122,6 @@ def group_mean(
         n_groups=n_groups,
         include_zeros=include_zeros,
         threads=threads,
+        use_kahan=use_kahan,
         layout="csc" if isinstance(sparse_matrix, scipy.sparse.csc_matrix) else "csr",
     )

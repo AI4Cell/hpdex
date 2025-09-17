@@ -48,7 +48,8 @@ std::vector<double> group_mean(
     const int32_t*,
     const size_t&,
     bool,
-    int
+    int,
+    bool = false
 );
 
 

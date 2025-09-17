@@ -1,7 +1,10 @@
-name: Build wheels
+name: Build and Release Wheels
 
 on:
   workflow_dispatch:
+  push:
+    tags:
+      - "v*.*.*"
 
 jobs:
   build_wheels:
@@ -11,33 +14,63 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
 
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: true   # 拉取子模块（highway 等）
+          submodules: true
 
-      - name: Set up Python
+      - name: Set up Python (host)
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"   # host 环境 Python，仅用于运行 cibuildwheel
+          python-version: "3.12"
 
-      - name: Upgrade pip
-        run: python -m pip install --upgrade pip
-
-      - name: Install cibuildwheel
-        run: python -m pip install cibuildwheel
+      - name: Upgrade pip & install cibuildwheel
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install cibuildwheel
 
       - name: Build wheels
         run: cibuildwheel --output-dir dist
         env:
-          CIBW_BUILD_VERBOSITY: 1   # 输出详细日志
-          CIBW_SKIP: "pp*"          # 跳过 PyPy
-          CIBW_TEST_COMMAND: ""     # 禁用测试
+          CIBW_BUILD_VERBOSITY: 1
+          CIBW_SKIP: "pp* *-musllinux*"   # 跳过 PyPy & musllinux
+          CIBW_ARCHS_MACOS: "x86_64 arm64 universal2"
+          CIBW_ARCHS_LINUX: "x86_64"
+          CIBW_ARCHS_WINDOWS: "AMD64"
+          CIBW_TEST_REQUIRES: "numpy scipy"
+          CIBW_TEST_COMMAND: "python {project}/test/quick_test.py"
 
       - name: Upload wheels as artifact
         uses: actions/upload-artifact@v4
         with:
           name: wheels-${{ matrix.os }}
           path: dist/*
+
+  publish_pypi:
+    needs: build_wheels
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: wheels-ubuntu-latest
+          path: dist/linux
+      - uses: actions/download-artifact@v4
+        with:
+          name: wheels-windows-latest
+          path: dist/windows
+      - uses: actions/download-artifact@v4
+        with:
+          name: wheels-macos-latest
+          path: dist/macos
+
+      - name: Merge all wheels
+        run: mkdir dist/all && cp dist/linux/* dist/windows/* dist/macos/* dist/all/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          packages-dir: dist/all

@@ -1191,14 +1191,95 @@ group_mean_core(
     return std::move(mean_out);
 }
 
-// 对外包装：支持 CSC/CSR（CSR 视作“转置的 CSC”）
+// ========================= group_mean (Kahan) =========================
+template<class T>
+static force_inline_ std::vector<double>
+group_mean_core_kahan(
+    const T*           data,
+    const int64_t*     indices,
+    const int64_t*     indptr,
+    const size_t&      R,
+    const size_t&      C,
+    const size_t&      /*nnz*/,
+    const int32_t*     group_id,
+    const size_t&      n_groups,
+    bool               include_zeros,
+    int                threads
+){
+    const size_t G = n_groups;
+    if (G == 0 || C == 0) return {};
+
+    std::vector<size_t> group_rows(G, 0);
+    for (size_t r = 0; r < R; ++r) {
+        int g = group_id[r];
+        if (g >= 0 && size_t(g) < G) ++group_rows[size_t(g)];
+    }
+
+    if (threads < 0) threads = omp_get_max_threads();
+    if (threads > omp_get_max_threads()) threads = omp_get_max_threads();
+
+    std::vector<double> mean_out(C * G, 0.0);
+
+    #pragma omp parallel num_threads(threads)
+    {
+        std::vector<double> sum(G, 0.0);
+        std::vector<double> c(G, 0.0);  // 补偿项
+        std::vector<size_t> valid_cnt(G);
+        std::vector<size_t> invalid_cnt(G);
+
+        #pragma omp for schedule(dynamic)
+        for (std::ptrdiff_t cc = 0; cc < (std::ptrdiff_t)C; ++cc) {
+            std::fill(sum.begin(), sum.end(), 0.0);
+            std::fill(c.begin(),   c.end(),   0.0);
+            std::fill(valid_cnt.begin(), valid_cnt.end(), 0);
+            std::fill(invalid_cnt.begin(), invalid_cnt.end(), 0);
+
+            const size_t cidx   = static_cast<size_t>(cc);
+            const int64_t p0 = indptr[cidx];
+            const int64_t p1 = indptr[cidx + 1];
+
+            for (int64_t p = p0; p < p1; ++p) {
+                const int64_t r = indices[p];
+                if (r < 0 || size_t(r) >= R) continue;
+
+                const int gi = group_id[size_t(r)];
+                if (gi < 0 || size_t(gi) >= G) continue;
+
+                const double v = static_cast<double>(data[p]);
+                if (is_valid_value(v)) {
+                    // --- Kahan summation ---
+                    double y = v - c[gi];
+                    double t = sum[gi] + y;
+                    c[gi] = (t - sum[gi]) - y;
+                    sum[gi] = t;
+                    ++valid_cnt[gi];
+                } else {
+                    ++invalid_cnt[gi];
+                }
+            }
+
+            double* out_col = mean_out.data() + cidx * G;
+            for (size_t g = 0; g < G; ++g) {
+                size_t denom = include_zeros
+                    ? (group_rows[g] - invalid_cnt[g])
+                    :  valid_cnt[g];
+                out_col[g] = (denom > 0) ? (sum[g] / static_cast<double>(denom)) : 0.0;
+            }
+        }
+    }
+
+    return mean_out;
+}
+
+// ========================= 外部包装 =========================
 template<class T>
 std::vector<double> group_mean(
     const view::CscView<T>& A,
     const int32_t* group_id,
     const size_t&  n_groups,
-    bool           include_zeros,   // fold-change 场景建议传 true
-    int            threads
+    bool           include_zeros,
+    int            threads,
+    bool           use_kahan
 ){
     const T* data = A.data();
     const int64_t* indices = A.indices();
@@ -1207,12 +1288,19 @@ std::vector<double> group_mean(
     size_t R = A.rows();
     size_t nnz = A.nnz();
 
-    return std::move(group_mean_core<T>(
-        data, indices, indptr,
-        R, C, nnz,
-        group_id, n_groups,
-        include_zeros, threads
-    ));
+    if (use_kahan) {
+        return group_mean_core_kahan<T>(
+            data, indices, indptr,
+            R, C, nnz, group_id, n_groups,
+            include_zeros, threads
+        );
+    } else {
+        return group_mean_core<T>(
+            data, indices, indptr,
+            R, C, nnz, group_id, n_groups,
+            include_zeros, threads
+        );
+    }
 }
 
 // 显式实例化
@@ -1235,7 +1323,8 @@ TYPE_DISPATCH(MWU_INSTANTIATE);
         const int32_t*, \
         const size_t&, \
         bool, \
-        int \
+        int, \
+        bool \
     );
 
 TYPE_DISPATCH(GROUP_MEAN_INSTANTIATE);

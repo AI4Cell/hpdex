@@ -115,6 +115,7 @@ py::array_t<double> call_group_mean_numpy(
     py::array_t<int32_t> group_id,
     size_t n_groups,
     bool include_zeros,
+    bool use_kahan,
     int threads,
     bool is_csr
 ) {
@@ -132,7 +133,7 @@ py::array_t<double> call_group_mean_numpy(
 
     const int32_t* gid_ptr = group_id.data();
 
-    auto result = group_mean<T>(V, gid_ptr, n_groups, include_zeros, threads);
+    auto result = group_mean<T>(V, gid_ptr, n_groups, include_zeros, threads, use_kahan);
 
     auto arr = py::array_t<double>(result.size(), result.data());
     arr.attr("flags").attr("writeable") = py::bool_(false);
@@ -164,27 +165,27 @@ py::array_t<double> call_group_mean_numpy(
     else \
         throw std::runtime_error("Unsupported dtype for data");
 
-#define DISPATCH_DTYPE_GM(DATA, INDICES, INDPTR, GID, N_GROUPS, EXTRA, THREADS, IS_CSR, CALLER) \
+#define DISPATCH_DTYPE_GM(DATA, INDICES, INDPTR, GID, N_GROUPS, EXTRA, THREADS, USE_KAHAN, IS_CSR, CALLER) \
     if (DATA.dtype().is(py::dtype::of<int8_t>())) \
-        return CALLER<int8_t>(DATA.cast<py::array_t<int8_t>>(), INDICES.cast<py::array_t<int64_t>>(), INDPTR.cast<py::array_t<int64_t>>(), GID.cast<py::array_t<int32_t>>(), N_GROUPS, EXTRA, THREADS, IS_CSR); \
+        return CALLER<int8_t>(DATA.cast<py::array_t<int8_t>>(), INDICES.cast<py::array_t<int64_t>>(), INDPTR.cast<py::array_t<int64_t>>(), GID.cast<py::array_t<int32_t>>(), N_GROUPS, EXTRA, THREADS, USE_KAHAN, IS_CSR); \
     else if (DATA.dtype().is(py::dtype::of<uint8_t>())) \
-        return CALLER<uint8_t>(DATA.cast<py::array_t<uint8_t>>(), INDICES.cast<py::array_t<int64_t>>(), INDPTR.cast<py::array_t<int64_t>>(), GID.cast<py::array_t<int32_t>>(), N_GROUPS, EXTRA, THREADS, IS_CSR); \
+        return CALLER<uint8_t>(DATA.cast<py::array_t<uint8_t>>(), INDICES.cast<py::array_t<int64_t>>(), INDPTR.cast<py::array_t<int64_t>>(), GID.cast<py::array_t<int32_t>>(), N_GROUPS, EXTRA, THREADS, USE_KAHAN, IS_CSR); \
     else if (DATA.dtype().is(py::dtype::of<int16_t>())) \
-        return CALLER<int16_t>(DATA.cast<py::array_t<int16_t>>(), INDICES.cast<py::array_t<int64_t>>(), INDPTR.cast<py::array_t<int64_t>>(), GID.cast<py::array_t<int32_t>>(), N_GROUPS, EXTRA, THREADS, IS_CSR); \
+        return CALLER<int16_t>(DATA.cast<py::array_t<int16_t>>(), INDICES.cast<py::array_t<int64_t>>(), INDPTR.cast<py::array_t<int64_t>>(), GID.cast<py::array_t<int32_t>>(), N_GROUPS, EXTRA, THREADS, USE_KAHAN, IS_CSR); \
     else if (DATA.dtype().is(py::dtype::of<uint16_t>())) \
-        return CALLER<uint16_t>(DATA.cast<py::array_t<uint16_t>>(), INDICES.cast<py::array_t<int64_t>>(), INDPTR.cast<py::array_t<int64_t>>(), GID.cast<py::array_t<int32_t>>(), N_GROUPS, EXTRA, THREADS, IS_CSR); \
+        return CALLER<uint16_t>(DATA.cast<py::array_t<uint16_t>>(), INDICES.cast<py::array_t<int64_t>>(), INDPTR.cast<py::array_t<int64_t>>(), GID.cast<py::array_t<int32_t>>(), N_GROUPS, EXTRA, THREADS, USE_KAHAN, IS_CSR); \
     else if (DATA.dtype().is(py::dtype::of<int32_t>())) \
-        return CALLER<int32_t>(DATA.cast<py::array_t<int32_t>>(), INDICES.cast<py::array_t<int64_t>>(), INDPTR.cast<py::array_t<int64_t>>(), GID.cast<py::array_t<int32_t>>(), N_GROUPS, EXTRA, THREADS, IS_CSR); \
+        return CALLER<int32_t>(DATA.cast<py::array_t<int32_t>>(), INDICES.cast<py::array_t<int64_t>>(), INDPTR.cast<py::array_t<int64_t>>(), GID.cast<py::array_t<int32_t>>(), N_GROUPS, EXTRA, THREADS, USE_KAHAN, IS_CSR); \
     else if (DATA.dtype().is(py::dtype::of<uint32_t>())) \
-        return CALLER<uint32_t>(DATA.cast<py::array_t<uint32_t>>(), INDICES.cast<py::array_t<int64_t>>(), INDPTR.cast<py::array_t<int64_t>>(), GID.cast<py::array_t<int32_t>>(), N_GROUPS, EXTRA, THREADS, IS_CSR); \
+        return CALLER<uint32_t>(DATA.cast<py::array_t<uint32_t>>(), INDICES.cast<py::array_t<int64_t>>(), INDPTR.cast<py::array_t<int64_t>>(), GID.cast<py::array_t<int32_t>>(), N_GROUPS, EXTRA, THREADS, USE_KAHAN, IS_CSR); \
     else if (DATA.dtype().is(py::dtype::of<int64_t>())) \
-        return CALLER<int64_t>(DATA.cast<py::array_t<int64_t>>(), INDICES.cast<py::array_t<int64_t>>(), INDPTR.cast<py::array_t<int64_t>>(), GID.cast<py::array_t<int32_t>>(), N_GROUPS, EXTRA, THREADS, IS_CSR); \
+        return CALLER<int64_t>(DATA.cast<py::array_t<int64_t>>(), INDICES.cast<py::array_t<int64_t>>(), INDPTR.cast<py::array_t<int64_t>>(), GID.cast<py::array_t<int32_t>>(), N_GROUPS, EXTRA, THREADS, USE_KAHAN, IS_CSR); \
     else if (DATA.dtype().is(py::dtype::of<uint64_t>())) \
-        return CALLER<uint64_t>(DATA.cast<py::array_t<uint64_t>>(), INDICES.cast<py::array_t<int64_t>>(), INDPTR.cast<py::array_t<int64_t>>(), GID.cast<py::array_t<int32_t>>(), N_GROUPS, EXTRA, THREADS, IS_CSR); \
+        return CALLER<uint64_t>(DATA.cast<py::array_t<uint64_t>>(), INDICES.cast<py::array_t<int64_t>>(), INDPTR.cast<py::array_t<int64_t>>(), GID.cast<py::array_t<int32_t>>(), N_GROUPS, EXTRA, THREADS, USE_KAHAN, IS_CSR); \
     else if (DATA.dtype().is(py::dtype::of<float>())) \
-        return CALLER<float>(DATA.cast<py::array_t<float>>(), INDICES.cast<py::array_t<int64_t>>(), INDPTR.cast<py::array_t<int64_t>>(), GID.cast<py::array_t<int32_t>>(), N_GROUPS, EXTRA, THREADS, IS_CSR); \
+        return CALLER<float>(DATA.cast<py::array_t<float>>(), INDICES.cast<py::array_t<int64_t>>(), INDPTR.cast<py::array_t<int64_t>>(), GID.cast<py::array_t<int32_t>>(), N_GROUPS, EXTRA, THREADS, USE_KAHAN, IS_CSR); \
     else if (DATA.dtype().is(py::dtype::of<double>())) \
-        return CALLER<double>(DATA.cast<py::array_t<double>>(), INDICES.cast<py::array_t<int64_t>>(), INDPTR.cast<py::array_t<int64_t>>(), GID.cast<py::array_t<int32_t>>(), N_GROUPS, EXTRA, THREADS, IS_CSR); \
+        return CALLER<double>(DATA.cast<py::array_t<double>>(), INDICES.cast<py::array_t<int64_t>>(), INDPTR.cast<py::array_t<int64_t>>(), GID.cast<py::array_t<int32_t>>(), N_GROUPS, EXTRA, THREADS, USE_KAHAN, IS_CSR); \
     else \
         throw std::runtime_error("Unsupported dtype for data");
 
@@ -228,14 +229,15 @@ PYBIND11_MODULE(kernel, m) {
 
     m.def("group_mean",
         [](py::array data, py::array indices, py::array indptr, py::array group_id,
-           size_t n_groups, bool include_zeros, int threads, std::string layout) {
+           size_t n_groups, bool include_zeros, int threads, bool use_kahan, std::string layout) {
             bool is_csr = (layout == "csr");
             DISPATCH_DTYPE_GM(data, indices, indptr, group_id,
-                           n_groups, include_zeros, threads, is_csr, call_group_mean_numpy);
+                           n_groups, include_zeros, threads, use_kahan, is_csr, call_group_mean_numpy);
         },
         py::arg("data"), py::arg("indices"), py::arg("indptr"), py::arg("group_id"),
         py::arg("n_groups"), py::arg("include_zeros") = true,
         py::arg("threads") = -1,
+        py::arg("use_kahan") = false,
         py::arg("layout") = "csc"
     );
 }
