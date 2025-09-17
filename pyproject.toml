@@ -38,8 +38,14 @@ minimum-version = "0.9"
 [tool.scikit-build.wheel]
 packages = ["src/hpdex"]
 
+[tool.scikit-build.install]
+components = ["Runtime", "Libraries"]
+
 [tool.cibuildwheel]
 build = "cp310-* cp311-* cp312-* cp313-*"
 skip = ["pp*", "*-musllinux*"]
 test-requires = ["numpy", "scipy"]
 test-command = "python {project}/test/quick_test.py"
+
+[tool.cibuildwheel.macos]
+before-build = "brew install libomp"
