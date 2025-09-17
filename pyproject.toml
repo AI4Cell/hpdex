@@ -13,8 +13,8 @@ version = "1.0.0"
 description = "High-Performance Parallel Differential Expression Analysis for Single-Cell Data"
 readme = "README.md"
 requires-python = ">=3.10"
-license = {text = "MIT"}
-authors = [{name = "Your Name", email = "you@example.com"}]
+license = { text = "MIT" }
+authors = [{ name = "Wang Zhongqi", email = "2868116803@qq.com" }]
 keywords = ["single-cell", "differential expression", "pybind11", "parallel", "C++"]
 
 dependencies = [
@@ -28,24 +28,18 @@ dependencies = [
 
 [project.optional-dependencies]
 test = [
-  "pytest",
-  "pytest-cov",
   "scanpy",
-  "psutil",
   "pdex"
 ]
 
 [tool.scikit-build]
-# 可选：显示声明最低版本（非必须）
 minimum-version = "0.9"
 
 [tool.scikit-build.wheel]
-# 把 src/hpdex 复制进 wheel（纯 Python 文件、.pyi、__init__.py 等）
 packages = ["src/hpdex"]
-
 
 [tool.cibuildwheel]
 build = "cp310-* cp311-* cp312-* cp313-*"
 skip = ["pp*", "*-musllinux*"]
-test-requires = ["pytest"]
-test-command = "pytest -q {project}/tests"
+test-requires = ["numpy", "scipy"]
+test-command = "python {project}/test/quick_test.py"
